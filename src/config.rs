@@ -3,8 +3,9 @@
 use std::path::Path;
 use serde::Deserialize;
 
+use crate::chars;
 use crate::cost::Weights;
-use crate::layout::{KeyboardParams, KeyboardSize};
+use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
 use crate::search::SearchConfig;
 
 // ──────────────────────────────────────
@@ -19,6 +20,8 @@ pub struct Config {
     pub weights: WeightsConfig,
     #[serde(default)]
     pub slot_difficulty: SlotDifficultyConfig,
+    #[serde(default)]
+    pub constraints: ConstraintsConfig,
 }
 
 // ──────────────────────────────────────
@@ -158,6 +161,40 @@ impl Config {
 
     pub fn seed(&self, cli_override: Option<u64>) -> u64 {
         cli_override.or(self.run.seed).unwrap_or_else(rand::random)
+    }
+}
+
+// ──────────────────────────────────────
+// [constraints] セクション
+// ──────────────────────────────────────
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ConstraintsConfig {
+    #[serde(default)]
+    pub exclusive_pairs: Vec<ExclusivePairConfig>,
+}
+
+/// [[constraints.exclusive_pairs]] の1エントリ
+#[derive(Debug, Deserialize)]
+pub struct ExclusivePairConfig {
+    /// 制約グループA（かな文字列、例: "ゃゅょ"）
+    pub group_a: String,
+    /// 制約グループB（かな文字列、例: "きしちにひみり"）
+    pub group_b: String,
+}
+
+impl Config {
+    /// 排他配置ペア設定を ExclusivePair リストに変換する
+    pub fn build_exclusive_pairs(&self) -> Vec<ExclusivePair> {
+        let char_map = chars::build_char_to_id();
+        self.constraints.exclusive_pairs.iter().map(|p| ExclusivePair {
+            group_a: p.group_a.chars()
+                .filter_map(|c| char_map.get(&c).copied())
+                .collect(),
+            group_b: p.group_b.chars()
+                .filter_map(|c| char_map.get(&c).copied())
+                .collect(),
+        }).collect()
     }
 }
 

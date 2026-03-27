@@ -39,6 +39,7 @@ use rand::rngs::SmallRng;
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use signal_hook::flag;
 
+use chars::CHAR_LIST;
 use config::{Config, keyboard_size_str};
 use corpus::Corpus;
 use cost::{score, score_breakdown};
@@ -115,6 +116,9 @@ fn main() {
         toml_config.build_keyboard_params()
     };
 
+    // ── 排他配置ペア制約 ──────────────────────────
+    let exclusive_pairs = toml_config.build_exclusive_pairs();
+
     // ── 設定ビルド ───────────────────────────────
     let mut search_config = toml_config.build_search_config();
     let mut weights       = toml_config.build_weights(kp);
@@ -185,6 +189,15 @@ fn main() {
     let _ = writeln!(out, " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}",
         weights.alternation_bonus, weights.outroll_bonus,
         weights.inroll_bonus, weights.quasi_alt_bonus);
+    if exclusive_pairs.is_empty() {
+        let _ = writeln!(out, " exclusive_pairs = (なし)");
+    } else {
+        for pair in &exclusive_pairs {
+            let a: String = pair.group_a.iter().map(|&c| CHAR_LIST[c as usize]).collect();
+            let b: String = pair.group_b.iter().map(|&c| CHAR_LIST[c as usize]).collect();
+            let _ = writeln!(out, " exclusive_pair  A={}  B={}", a, b);
+        }
+    }
     let _ = writeln!(out, " slot_difficulty:");
     let nc = kp.num_cols as usize;
     for (r, row) in weights.slot_difficulty.iter().enumerate() {
@@ -194,7 +207,7 @@ fn main() {
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // ── 初期解生成 ───────────────────────────────
-    let initial_layout = search::build_initial_layout(&corpus, kp, &mut out);
+    let initial_layout = search::build_initial_layout(&corpus, kp, &exclusive_pairs, &mut out);
     let _ = writeln!(out, "【初期解】");
     initial_layout.display(&mut out);
     let initial_score = score(&initial_layout, &corpus, &weights);
@@ -210,7 +223,7 @@ fn main() {
 
     // ── タブーサーチ ─────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
-    let best_layout = search::run(initial_layout, &corpus, &weights, &search_config, &mut rng, &stop_flag, &report_flag, &mut out);
+    let best_layout = search::run(initial_layout, &corpus, &weights, &search_config, &mut rng, &stop_flag, &report_flag, &exclusive_pairs, &mut out);
 
     // ── 結果表示 ─────────────────────────────────
     let _ = writeln!(out, "\n【最適化結果】");

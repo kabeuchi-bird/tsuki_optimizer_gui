@@ -1,9 +1,10 @@
 // layout.rs — 月配列改変版のレイアウト定義
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use crate::chars::{
-    CharId, MAX_CHARS, TOUTEN_ID, KUTEN_ID, DAKUTEN_ID, HANDAKUTEN_ID,
+    CharId, MAX_CHARS, TOUTEN_ID, KUTEN_ID, DAKUTEN_ID, HANDAKUTEN_ID, VOID_CHAR_FIRST,
 };
 
 pub type SlotId = u8;
@@ -320,4 +321,64 @@ pub fn is_l1_only(c: CharId) -> bool {
 #[inline]
 pub fn is_inter_layer_movable(c: CharId, kp: KeyboardParams) -> bool {
     !is_fixed(c, kp) && !is_l1_only(c)
+}
+
+// ──────────────────────────────────────────────────────────────
+// 排他配置ペア制約
+// ──────────────────────────────────────────────────────────────
+
+/// 排他配置ペア：GroupAとGroupBのかなを同一物理キーのL1/L2に共存させない
+pub struct ExclusivePair {
+    pub group_a: HashSet<CharId>,
+    pub group_b: HashSet<CharId>,
+}
+
+impl ExclusivePair {
+    /// L1/L2のペアが制約に違反するか（どちらの向きも対称）
+    #[inline]
+    pub fn violates(&self, l1_c: CharId, l2_c: CharId) -> bool {
+        (self.group_a.contains(&l1_c) && self.group_b.contains(&l2_c))
+            || (self.group_b.contains(&l1_c) && self.group_a.contains(&l2_c))
+    }
+}
+
+/// スワップ (c1↔c2) 後に特定スロットに配置される文字IDを返す（レイアウト変更なし）
+#[inline]
+fn char_at_slot_after_swap(layout: &Layout, c1: CharId, c2: CharId, slot: usize) -> CharId {
+    let s1 = layout.char_to_slot[c1 as usize] as usize;
+    let s2 = layout.char_to_slot[c2 as usize] as usize;
+    if slot == s1 { c2 } else if slot == s2 { c1 } else { layout.slot_to_char[slot] }
+}
+
+/// L1スロット l1_slot とその対応 L2スロット (l1_slot + npl) のペアが、
+/// スワップ (c1↔c2) 後に排他ペア制約を違反するか
+fn pair_violates_after_swap(
+    layout: &Layout,
+    c1: CharId, c2: CharId,
+    l1_slot: usize,
+    pairs: &[ExclusivePair],
+) -> bool {
+    let npl = layout.kp.num_slots_per_layer as usize;
+    let l2_slot = l1_slot + npl;
+    let l1_c = char_at_slot_after_swap(layout, c1, c2, l1_slot);
+    let l2_c = char_at_slot_after_swap(layout, c1, c2, l2_slot);
+    // SHIFT_SLOT_SENTINEL(255) も void chars(>=62) もここで除外される
+    if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST { return false; }
+    pairs.iter().any(|p| p.violates(l1_c, l2_c))
+}
+
+/// スワップ (c1↔c2) が排他ペア制約に違反するか（影響する最大2スロット列を確認）
+pub fn swap_would_violate(
+    layout: &Layout,
+    c1: CharId, c2: CharId,
+    pairs: &[ExclusivePair],
+) -> bool {
+    if pairs.is_empty() { return false; }
+    let npl = layout.kp.num_slots_per_layer as usize;
+    let s1 = layout.char_to_slot[c1 as usize] as usize;
+    let s2 = layout.char_to_slot[c2 as usize] as usize;
+    let l1_s1 = if s1 < npl { s1 } else { s1 - npl };
+    let l1_s2 = if s2 < npl { s2 } else { s2 - npl };
+    pair_violates_after_swap(layout, c1, c2, l1_s1, pairs)
+        || (l1_s2 != l1_s1 && pair_violates_after_swap(layout, c1, c2, l1_s2, pairs))
 }
