@@ -1,9 +1,10 @@
 // config.rs — TOMLベース設定ファイルの読み込みと構造体への変換
 
+use std::collections::HashSet;
 use std::path::Path;
 use serde::Deserialize;
 
-use crate::chars;
+use crate::chars::{self, MAX_CHARS};
 use crate::cost::Weights;
 use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
 use crate::search::SearchConfig;
@@ -149,6 +150,7 @@ impl Config {
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),
                 parse_difficulty_row(s.row2.as_deref(), d.slot_difficulty[2]),
             ],
+            daku_l2_trigger: self.build_daku_l2_trigger(),
         }
     }
 
@@ -172,6 +174,8 @@ impl Config {
 pub struct ConstraintsConfig {
     #[serde(default)]
     pub exclusive_pairs: Vec<ExclusivePairConfig>,
+    /// プリセット名: "all-daku" または "i-daku"（未指定は None）
+    pub preset: Option<String>,
 }
 
 /// [[constraints.exclusive_pairs]] の1エントリ
@@ -183,18 +187,69 @@ pub struct ExclusivePairConfig {
     pub group_b: String,
 }
 
+// 濁音になりうる音すべて ＋ 濁点
+const DAKUON_BASE: &str  = "うかきくけこさしすせそたちつてとはひふへほ゛";
+// イ段のみ（きしちひ）
+const DAKUON_I_ROW: &str = "きしちひ";
+
 impl Config {
-    /// 排他配置ペア設定を ExclusivePair リストに変換する
+    /// 排他配置ペア設定（プリセット + 明示ペア）を ExclusivePair リストに変換する
     pub fn build_exclusive_pairs(&self) -> Vec<ExclusivePair> {
         let char_map = chars::build_char_to_id();
-        self.constraints.exclusive_pairs.iter().map(|p| ExclusivePair {
-            group_a: p.group_a.chars()
+        let mut result = Vec::new();
+
+        // プリセット展開
+        if let Some(preset) = &self.constraints.preset {
+            let daku_set: HashSet<_> = DAKUON_BASE.chars()
                 .filter_map(|c| char_map.get(&c).copied())
-                .collect(),
-            group_b: p.group_b.chars()
-                .filter_map(|c| char_map.get(&c).copied())
-                .collect(),
-        }).collect()
+                .collect();
+            match preset.as_str() {
+                "all-daku" => result.push(ExclusivePair {
+                    group_a: daku_set.clone(),
+                    group_b: daku_set,
+                }),
+                "i-daku" => {
+                    let i_row: HashSet<_> = DAKUON_I_ROW.chars()
+                        .filter_map(|c| char_map.get(&c).copied())
+                        .collect();
+                    result.push(ExclusivePair { group_a: i_row, group_b: daku_set });
+                },
+                other => eprintln!("警告: 不明なプリセット '{}' → 無視します", other),
+            }
+        }
+
+        // 明示的ペア（プリセットと併用可）
+        for p in &self.constraints.exclusive_pairs {
+            result.push(ExclusivePair {
+                group_a: p.group_a.chars()
+                    .filter_map(|c| char_map.get(&c).copied())
+                    .collect(),
+                group_b: p.group_b.chars()
+                    .filter_map(|c| char_map.get(&c).copied())
+                    .collect(),
+            });
+        }
+
+        result
+    }
+
+    /// プリセットに基づいて daku_l2_trigger 配列を生成する
+    /// true の文字が L2 に配置されている状態で直後に゛が来ると -1打鍵のボーナスが入る
+    pub fn build_daku_l2_trigger(&self) -> [bool; MAX_CHARS] {
+        let mut trigger = [false; MAX_CHARS];
+        // ゛は常にL1固定なのでトリガー対象から外す
+        let target_str = match self.constraints.preset.as_deref() {
+            Some("all-daku") => "うかきくけこさしすせそたちつてとはひふへほ",
+            Some("i-daku")   => "きしちひ",
+            _                => return trigger,
+        };
+        let char_map = chars::build_char_to_id();
+        for c in target_str.chars() {
+            if let Some(&id) = char_map.get(&c) {
+                trigger[id as usize] = true;
+            }
+        }
+        trigger
     }
 }
 

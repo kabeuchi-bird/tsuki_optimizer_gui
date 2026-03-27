@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::chars::{CharId, TOUTEN_ID, KUTEN_ID};
+use crate::chars::{CharId, DAKUTEN_ID, TOUTEN_ID, KUTEN_ID, MAX_CHARS};
 use crate::corpus::Corpus;
 use crate::layout::{
     Layout, SlotId, Hand,
@@ -44,6 +44,10 @@ pub struct Weights {
 
     /// 準交互打鍵（LLR/RRL等）ボーナス（trigram単位）
     pub quasi_alt_bonus: f64,
+
+    /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
+    /// （デフォルトはすべて false = 削減なし）
+    pub daku_l2_trigger: [bool; MAX_CHARS],
 }
 
 impl Default for Weights {
@@ -69,6 +73,7 @@ impl Default for Weights {
             outroll_bonus:       0.4,
             inroll_bonus:        0.15,
             quasi_alt_bonus:     0.1,
+            daku_l2_trigger:     [false; MAX_CHARS],
         }
     }
 }
@@ -135,13 +140,22 @@ pub fn unigram_cost_for_slot(slot: SlotId, w: &Weights) -> f64 {
 /// （3x10/3x11 共通。。/、は文として区切りになるため）
 /// ——————————————————————————————
 #[inline]
-pub fn bigram_inter_cost(c1: CharId, slot1: SlotId, slot2: SlotId, w: &Weights) -> f64 {
+pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w: &Weights) -> f64 {
     if c1 == KUTEN_ID || c1 == TOUTEN_ID {
         return 0.0;
     }
     let ks1 = keystrokes_for_slot(slot1, w.kp);
     let ks2 = keystrokes_for_slot(slot2, w.kp);
-    key_pair_cost(ks1.last(), ks2.first(), w)
+    let mut cost = key_pair_cost(ks1.last(), ks2.first(), w);
+    // L2配置の濁音基音 → ゛ 打鍵数削減ボーナス（1打鍵分）
+    // delta_score() は slot_after_swap() で仮スロットを渡すため追加実装不要
+    if c2 == DAKUTEN_ID
+        && w.daku_l2_trigger[c1 as usize]
+        && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
+    {
+        cost -= w.stroke_scale;
+    }
+    cost
 }
 
 /// ——————————————————————————————
@@ -183,7 +197,7 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
         if bg.freq == 0.0 { continue; }
         let s1 = layout.char_to_slot[bg.c1 as usize];
         let s2 = layout.char_to_slot[bg.c2 as usize];
-        total += bg.freq * bigram_inter_cost(bg.c1, s1, s2, w);
+        total += bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
     }
 
     // 4. トライグラム準交互ボーナス
@@ -246,11 +260,11 @@ pub fn delta_score(
 
             let s_c1_old = layout.char_to_slot[bg.c1 as usize];
             let s_c2_old = layout.char_to_slot[bg.c2 as usize];
-            let old_cost = bigram_inter_cost(bg.c1, s_c1_old, s_c2_old, w);
+            let old_cost = bigram_inter_cost(bg.c1, bg.c2, s_c1_old, s_c2_old, w);
 
             let s_c1_new = slot_after_swap(layout, swap_c1, swap_c2, bg.c1);
             let s_c2_new = slot_after_swap(layout, swap_c1, swap_c2, bg.c2);
-            let new_cost = bigram_inter_cost(bg.c1, s_c1_new, s_c2_new, w);
+            let new_cost = bigram_inter_cost(bg.c1, bg.c2, s_c1_new, s_c2_new, w);
 
             delta += bg.freq * (new_cost - old_cost);
         }
@@ -322,7 +336,7 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
         if bg.freq == 0.0 { continue; }
         let s1 = layout.char_to_slot[bg.c1 as usize];
         let s2 = layout.char_to_slot[bg.c2 as usize];
-        bi_cost += bg.freq * bigram_inter_cost(bg.c1, s1, s2, w);
+        bi_cost += bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
     }
     for tg in &corpus.trigrams {
         if tg.freq == 0.0 { continue; }
