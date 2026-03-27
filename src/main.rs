@@ -207,7 +207,8 @@ fn main() {
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // ── 初期解生成 ───────────────────────────────
-    let initial_layout = search::build_initial_layout(&corpus, kp, &exclusive_pairs, &mut out);
+    let ctx = search::SearchContext { corpus: &corpus, weights: &weights, pairs: &exclusive_pairs };
+    let initial_layout = search::build_initial_layout(&ctx, kp, &mut out);
     let _ = writeln!(out, "【初期解】");
     initial_layout.display(&mut out);
     let initial_score = score(&initial_layout, &corpus, &weights);
@@ -223,7 +224,7 @@ fn main() {
 
     // ── タブーサーチ ─────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
-    let best_layout = search::run(initial_layout, &corpus, &weights, &search_config, &mut rng, &stop_flag, &report_flag, &exclusive_pairs, &mut out);
+    let best_layout = search::run(initial_layout, &ctx, &search_config, &mut rng, &stop_flag, &report_flag, &mut out);
 
     // ── 結果表示 ─────────────────────────────────
     let _ = writeln!(out, "\n【最適化結果】");
