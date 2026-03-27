@@ -189,6 +189,9 @@ fn main() {
     let _ = writeln!(out, " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}",
         weights.alternation_bonus, weights.outroll_bonus,
         weights.inroll_bonus, weights.quasi_alt_bonus);
+    if let Some(p) = &toml_config.constraints.preset {
+        let _ = writeln!(out, " constraints.preset = {}", p);
+    }
     if exclusive_pairs.is_empty() {
         let _ = writeln!(out, " exclusive_pairs = (なし)");
     } else {
