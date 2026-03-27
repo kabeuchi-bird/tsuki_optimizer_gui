@@ -28,7 +28,7 @@ pub struct Weights {
 
     /// 同指連打ペナルティ（同じ指・異なるキー）
     pub same_finger_penalty: f64,
-    /// 同キー連打ペナルティ（同じキーを連続）
+    /// 同キー連打ペナルティ（同じ物理キーを連続。L1同士は同一文字、L2→L1は異なる文字でも発生）
     pub same_key_penalty: f64,
     /// 同手・上段⟺下段 段跨ぎペナルティ（row差2）
     pub upper_lower_jump: f64,
