@@ -219,6 +219,42 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
 }
 
 /// ——————————————————————————————
+/// デルタスコア計算用の再利用バッファ
+///
+/// `delta_score()` は毎イテレーション数百回呼ばれるため、
+/// 訪問済みフラグの Vec<bool> を毎回確保するのは非常に高コスト。
+/// スタンプ方式: 各エントリに「最後にアクセスした世代番号」を記録し、
+/// 現在の世代と一致すれば訪問済みとみなす。リセットは世代番号のインクリメントのみ。
+/// ——————————————————————————————
+pub struct DeltaScoreBuffer {
+    bi_stamp: Vec<u32>,
+    tri_stamp: Vec<u32>,
+    generation: u32,
+}
+
+impl DeltaScoreBuffer {
+    pub fn new(num_bigrams: usize, num_trigrams: usize) -> Self {
+        DeltaScoreBuffer {
+            bi_stamp: vec![0; num_bigrams],
+            tri_stamp: vec![0; num_trigrams],
+            generation: 0,
+        }
+    }
+
+    /// 世代を進める（O(1) でリセット相当）
+    #[inline]
+    fn advance(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        // 世代が 0 に巻き戻った場合は全クリア（約42億回に1回）
+        if self.generation == 0 {
+            self.bi_stamp.fill(0);
+            self.tri_stamp.fill(0);
+            self.generation = 1;
+        }
+    }
+}
+
+/// ——————————————————————————————
 /// デルタスコア（スワップ swap_c1 ⟺ swap_c2 によるスコア変化量）
 /// ——————————————————————————————
 pub fn delta_score(
@@ -227,7 +263,10 @@ pub fn delta_score(
     w: &Weights,
     swap_c1: CharId,
     swap_c2: CharId,
+    buf: &mut DeltaScoreBuffer,
 ) -> f64 {
+    buf.advance();
+    let gen = buf.generation;
     let mut delta = 0.0;
 
     let s1_old = layout.char_to_slot[swap_c1 as usize];
@@ -254,12 +293,10 @@ pub fn delta_score(
            * (unigram_cost_for_slot(s2_new, w) - unigram_cost_for_slot(s2_old, w));
 
     // バイグラム差分
-    let mut visited = vec![false; corpus.bigrams.len()];
-
     for &c in &[swap_c1, swap_c2] {
         for &idx in &corpus.bigram_adj[c as usize] {
-            if visited[idx] { continue; }
-            visited[idx] = true;
+            if buf.bi_stamp[idx] == gen { continue; }
+            buf.bi_stamp[idx] = gen;
 
             let bg = &corpus.bigrams[idx];
             if bg.freq == 0.0 { continue; }
@@ -277,12 +314,10 @@ pub fn delta_score(
     }
 
     // トライグラム準交互差分
-    let mut tri_visited = vec![false; corpus.trigrams.len()];
-
     for &c in &[swap_c1, swap_c2] {
         for &idx in &corpus.trigram_adj[c as usize] {
-            if tri_visited[idx] { continue; }
-            tri_visited[idx] = true;
+            if buf.tri_stamp[idx] == gen { continue; }
+            buf.tri_stamp[idx] = gen;
 
             let tg = &corpus.trigrams[idx];
             if tg.freq == 0.0 { continue; }
@@ -318,8 +353,22 @@ fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
     }
 }
 
-/// スコアの内訳を表示
-pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut impl Write) {
+/// スコア内訳の構造体（GUI 表示用）
+#[derive(Clone, Debug, Default)]
+pub struct ScoreBreakdown {
+    pub total: f64,
+    pub stroke_cost: f64,
+    pub uni_cost: f64,
+    pub bi_cost: f64,
+    pub tri_cost: f64,
+    pub total_strokes: f64,
+    pub l1_coverage: f64,
+    /// 指別負荷 [0..8]: 左小指, 左薬指, 左中指, 左人差し指, 右人差し指, 右中指, 右薬指, 右小指
+    pub finger_load: [f64; 8],
+}
+
+/// スコア内訳を構造体として返す
+pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> ScoreBreakdown {
     let nc = w.kp.num_chars;
     let mut stroke_cost = 0.0;
     let mut uni_cost = 0.0;
@@ -327,6 +376,7 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     let mut tri_cost = 0.0;
     let mut total_strokes = 0.0;
     let mut l1_coverage = 0.0;
+    let mut finger_load = [0.0f64; 8];
 
     for c in 0..nc as CharId {
         let freq = corpus.unigrams[c as usize];
@@ -337,6 +387,14 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
         let slot = layout.char_to_slot[c as usize];
         uni_cost += freq * unigram_cost_for_slot(slot, w);
         if strokes == 1 { l1_coverage += freq; }
+        // 指負荷: 文字キーのカラムから指番号を決定
+        let physical_slot = if (slot as usize) < w.kp.num_slots_per_layer as usize {
+            slot
+        } else {
+            slot - w.kp.num_slots_per_layer
+        };
+        let finger = col_to_finger(slot_col(physical_slot, w.kp.num_cols)) as usize;
+        finger_load[finger] += freq;
     }
     for bg in &corpus.bigrams {
         if bg.freq == 0.0 { continue; }
@@ -352,11 +410,25 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
         tri_cost += tg.freq * quasi_alt_bonus(h1, h2, h3, w);
     }
 
-    let total = stroke_cost + uni_cost + bi_cost + tri_cost;
+    ScoreBreakdown {
+        total: stroke_cost + uni_cost + bi_cost + tri_cost,
+        stroke_cost,
+        uni_cost,
+        bi_cost,
+        tri_cost,
+        total_strokes,
+        l1_coverage,
+        finger_load,
+    }
+}
+
+/// スコアの内訳を表示（score_breakdown_data() を利用して重複排除）
+pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut impl Write) {
+    let bd = score_breakdown_data(layout, corpus, w);
     let _ = writeln!(out, "  打鍵数コスト  : {:.4}  （平均打鍵数 {:.4}, 1打鍵カバー率 {:.1}%）",
-        stroke_cost, total_strokes, l1_coverage * 100.0);
-    let _ = writeln!(out, "  難易度コスト  : {:.4}", uni_cost);
-    let _ = writeln!(out, "  バイグラムコスト: {:.4}", bi_cost);
-    let _ = writeln!(out, "  準交互ボーナス: {:.4}", tri_cost);
-    let _ = writeln!(out, "  合計スコア    : {:.4}", total);
+        bd.stroke_cost, bd.total_strokes, bd.l1_coverage * 100.0);
+    let _ = writeln!(out, "  難易度コスト  : {:.4}", bd.uni_cost);
+    let _ = writeln!(out, "  バイグラムコスト: {:.4}", bd.bi_cost);
+    let _ = writeln!(out, "  準交互ボーナス: {:.4}", bd.tri_cost);
+    let _ = writeln!(out, "  合計スコア    : {:.4}", bd.total);
 }

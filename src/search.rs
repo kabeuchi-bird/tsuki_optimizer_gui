@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use rand::prelude::*;
 
-use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, VOID_CHAR_FIRST};
+use crate::chars::{CharId, MAX_CHARS, DAKUTEN_ID, HANDAKUTEN_ID, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
-use crate::cost::{delta_score, score, Weights};
+use crate::cost::{delta_score, score, DeltaScoreBuffer, Weights};
 use crate::layout::{
     ExclusivePair, KeyboardParams, Layout, SHIFT_SLOT_SENTINEL,
     is_fixed, is_inter_layer_movable, swap_would_violate,
@@ -59,6 +59,31 @@ pub struct SearchContext<'a> {
     pub corpus: &'a Corpus,
     pub weights: &'a Weights,
     pub pairs: &'a [ExclusivePair],
+}
+
+/// ——————————————————————————————
+/// 探索フェーズ（GUI 通信用）
+/// ——————————————————————————————
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchPhase {
+    Running,
+    Restarting,
+    Finished,
+}
+
+/// ——————————————————————————————
+/// 探索状態の更新通知（GUI 通信用）
+/// ——————————————————————————————
+#[derive(Clone)]
+pub struct SearchUpdate {
+    pub iter: usize,
+    pub restarts: usize,
+    pub current_score: f64,
+    pub best_score: f64,
+    pub best_layout: Layout,
+    pub phase: SearchPhase,
+    /// ユニグラム頻度（GUI の色分け・指負荷計算用）
+    pub unigrams: [f64; MAX_CHARS],
 }
 
 /// ——————————————————————————————
@@ -128,6 +153,7 @@ pub fn run(
     rng: &mut impl Rng,
     stop_flag: &Arc<AtomicBool>,
     report_flag: &Arc<AtomicBool>,
+    on_update: &mut impl FnMut(&SearchUpdate),
     out: &mut impl Write,
 ) -> Layout {
     let mut current = initial_layout.clone();
@@ -169,31 +195,40 @@ pub fn run(
     let mut tabu_l2    = TabuList::new(cur_tabu_l2);
     let mut tabu_inter = TabuList::new(cur_tabu_inter);
 
+    // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
+    let mut candidates: Vec<Candidate> = Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
+    let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
+
     while iter < config.max_iter {
         iter += 1;
 
-        let mut candidates: Vec<Candidate> = Vec::new();
+        candidates.clear();
 
-        let l1_free = collect_l1_free_chars(&current);
+        collect_l1_free_chars_into(&current, &mut l1_free);
         generate_swap_candidates(
             &current, ctx,
             &l1_free, OpKind::SwapL1,
             config.ab_sample_limit, rng,
             &mut candidates,
+            &mut delta_buf,
         );
 
-        let l2_free = collect_l2_chars(&current);
+        collect_l2_chars_into(&current, &mut l2_free);
         generate_swap_candidates(
             &current, ctx,
             &l2_free, OpKind::SwapL2,
             config.ab_sample_limit, rng,
             &mut candidates,
+            &mut delta_buf,
         );
 
         generate_inter_layer_candidates(
             &current, ctx,
             config.inter_sample, rng,
             &mut candidates,
+            &mut delta_buf,
         );
 
         if candidates.is_empty() { break; }
@@ -225,6 +260,12 @@ pub fn run(
             best_score  = current_score;
             best        = current.clone();
             no_improve  = 0;
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                unigrams: ctx.corpus.unigrams,
+                phase: SearchPhase::Running,
+            });
             if cur_tabu_l1 != config.tabu_l1
                 || cur_tabu_l2 != config.tabu_l2
                 || cur_tabu_inter != config.tabu_inter
@@ -266,6 +307,12 @@ pub fn run(
                 cur_tabu_l1, cur_tabu_l2, cur_tabu_inter,
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                unigrams: ctx.corpus.unigrams,
+                phase: SearchPhase::Running,
+            });
         }
 
         if no_improve >= config.restart_after {
@@ -288,6 +335,12 @@ pub fn run(
             tabu_inter = TabuList::new(cur_tabu_inter);
 
             let _ = writeln!(out, "  → 再起動 #{}: 摂動後スコア={:.4}", restarts, current_score);
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                unigrams: ctx.corpus.unigrams,
+                phase: SearchPhase::Restarting,
+            });
         }
 
         if report_flag.swap(false, Ordering::Relaxed) {
@@ -304,6 +357,12 @@ pub fn run(
         "探索完了: {} iter, {} restarts | 最良スコア={:.4}",
         iter, restarts, best_score
     );
+    on_update(&SearchUpdate {
+        iter, restarts, current_score, best_score,
+        best_layout: best.clone(),
+        unigrams: ctx.corpus.unigrams,
+        phase: SearchPhase::Finished,
+    });
     best
 }
 
@@ -311,20 +370,26 @@ pub fn run(
 // ヘルパー関数
 // ──────────────────────────────────────────────────────────────
 
-/// Layer 1 の可動文字（固定文字を除く）を収集
-fn collect_l1_free_chars(layout: &Layout) -> Vec<CharId> {
+/// Layer 1 の可動文字（固定文字を除く）を既存 Vec に収集（再利用版）
+fn collect_l1_free_chars_into(layout: &Layout, out: &mut Vec<CharId>) {
+    out.clear();
     let kp = layout.kp;
-    (0..kp.num_chars as CharId)
-        .filter(|&c| layout.is_l1(c) && !is_fixed(c, kp) && !is_void(c))
-        .collect()
+    for c in 0..kp.num_chars as CharId {
+        if layout.is_l1(c) && !is_fixed(c, kp) && !is_void(c) {
+            out.push(c);
+        }
+    }
 }
 
-/// Layer 2 の文字（void 除く）を収集
-fn collect_l2_chars(layout: &Layout) -> Vec<CharId> {
+/// Layer 2 の文字（void 除く）を既存 Vec に収集（再利用版）
+fn collect_l2_chars_into(layout: &Layout, out: &mut Vec<CharId>) {
+    out.clear();
     let kp = layout.kp;
-    (0..kp.num_chars as CharId)
-        .filter(|&c| !layout.is_l1(c) && !is_void(c))
-        .collect()
+    for c in 0..kp.num_chars as CharId {
+        if !layout.is_l1(c) && !is_void(c) {
+            out.push(c);
+        }
+    }
 }
 
 /// void文字（空きスロット代替）かどうか
@@ -342,6 +407,7 @@ fn generate_swap_candidates(
     sample_limit: usize,
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
+    buf: &mut DeltaScoreBuffer,
 ) {
     let n = chars.len();
     if n < 2 { return; }
@@ -352,7 +418,7 @@ fn generate_swap_candidates(
             for j in i + 1..n {
                 let (c1, c2) = (chars[i], chars[j]);
                 if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
-                let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2);
+                let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
                 out.push(Candidate { kind, c1, c2, delta });
             }
         }
@@ -366,7 +432,7 @@ fn generate_swap_candidates(
             if i == j { continue; }
             let (c1, c2) = (chars[i], chars[j]);
             if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
-            let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2);
+            let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
             out.push(Candidate { kind, c1, c2, delta });
             sampled += 1;
         }
@@ -380,6 +446,7 @@ fn generate_inter_layer_candidates(
     n_samples: usize,
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
+    buf: &mut DeltaScoreBuffer,
 ) {
     let kp = layout.kp;
 
@@ -409,7 +476,7 @@ fn generate_inter_layer_candidates(
         let c1 = weighted_choice(&l1_chars, &l1_weights, l1_w_sum, rng).0;
         let c2 = weighted_choice(&l2_chars, &l2_weights, l2_w_sum, rng).0;
         if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
-        let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2);
+        let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
         out.push(Candidate { kind: OpKind::InterLayer, c1, c2, delta });
         sampled += 1;
     }

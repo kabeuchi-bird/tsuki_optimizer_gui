@@ -22,13 +22,6 @@
 //                           "3x10"（デフォルト）または "3x11"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
-mod chars;
-mod config;
-mod corpus;
-mod cost;
-mod layout;
-mod search;
-
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -39,10 +32,12 @@ use rand::rngs::SmallRng;
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use signal_hook::flag;
 
-use chars::CHAR_LIST;
-use config::{Config, keyboard_size_str};
-use corpus::Corpus;
-use cost::{score, score_breakdown};
+use tsuki_optimize::chars::CHAR_LIST;
+use tsuki_optimize::config::{Config, keyboard_size_str};
+use tsuki_optimize::corpus::Corpus;
+use tsuki_optimize::cost::{score, score_breakdown};
+use tsuki_optimize::layout;
+use tsuki_optimize::search;
 
 // ──────────────────────────────────────────────────────────────
 // TeeWriter: stderr とログファイルの両方に書き込む
@@ -227,7 +222,7 @@ fn main() {
 
     // ── タブーサーチ ─────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
-    let best_layout = search::run(initial_layout, &ctx, &search_config, &mut rng, &stop_flag, &report_flag, &mut out);
+    let best_layout = search::run(initial_layout, &ctx, &search_config, &mut rng, &stop_flag, &report_flag, &mut |_| {}, &mut out);
 
     // ── 結果表示 ─────────────────────────────────
     let _ = writeln!(out, "\n【最適化結果】");
