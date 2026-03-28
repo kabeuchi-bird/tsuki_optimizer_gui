@@ -55,6 +55,7 @@ impl Corpus {
     /// - 配字されている文字（有声音含む）→ CharId に変換してセグメントに追加
     /// - 改行文字（`\n`, `\r`）         → スキップ
     /// - それ以外の配字外文字           → セグメントを切る
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Self {
         let map = build_char_to_id();
 

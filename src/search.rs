@@ -146,6 +146,7 @@ impl Default for SearchConfig {
 /// ——————————————————————————————
 /// タブーサーチ本体
 /// ——————————————————————————————
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     initial_layout: Layout,
     ctx: &SearchContext,
@@ -399,6 +400,7 @@ fn is_void(c: CharId) -> bool {
 }
 
 /// 操作A/B: 同レイヤー内スワップの候補を生成
+#[allow(clippy::too_many_arguments)]
 fn generate_swap_candidates(
     layout: &Layout,
     ctx: &SearchContext,
