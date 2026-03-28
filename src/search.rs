@@ -62,6 +62,29 @@ pub struct SearchContext<'a> {
 }
 
 /// ——————————————————————————————
+/// 探索フェーズ（GUI 通信用）
+/// ——————————————————————————————
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchPhase {
+    Running,
+    Restarting,
+    Finished,
+}
+
+/// ——————————————————————————————
+/// 探索状態の更新通知（GUI 通信用）
+/// ——————————————————————————————
+#[derive(Clone)]
+pub struct SearchUpdate {
+    pub iter: usize,
+    pub restarts: usize,
+    pub current_score: f64,
+    pub best_score: f64,
+    pub best_layout: Layout,
+    pub phase: SearchPhase,
+}
+
+/// ——————————————————————————————
 /// 操作の種類
 /// ——————————————————————————————
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +151,7 @@ pub fn run(
     rng: &mut impl Rng,
     stop_flag: &Arc<AtomicBool>,
     report_flag: &Arc<AtomicBool>,
+    on_update: &mut impl FnMut(&SearchUpdate),
     out: &mut impl Write,
 ) -> Layout {
     let mut current = initial_layout.clone();
@@ -225,6 +249,11 @@ pub fn run(
             best_score  = current_score;
             best        = current.clone();
             no_improve  = 0;
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                phase: SearchPhase::Running,
+            });
             if cur_tabu_l1 != config.tabu_l1
                 || cur_tabu_l2 != config.tabu_l2
                 || cur_tabu_inter != config.tabu_inter
@@ -266,6 +295,11 @@ pub fn run(
                 cur_tabu_l1, cur_tabu_l2, cur_tabu_inter,
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                phase: SearchPhase::Running,
+            });
         }
 
         if no_improve >= config.restart_after {
@@ -288,6 +322,11 @@ pub fn run(
             tabu_inter = TabuList::new(cur_tabu_inter);
 
             let _ = writeln!(out, "  → 再起動 #{}: 摂動後スコア={:.4}", restarts, current_score);
+            on_update(&SearchUpdate {
+                iter, restarts, current_score, best_score,
+                best_layout: best.clone(),
+                phase: SearchPhase::Restarting,
+            });
         }
 
         if report_flag.swap(false, Ordering::Relaxed) {
@@ -304,6 +343,11 @@ pub fn run(
         "探索完了: {} iter, {} restarts | 最良スコア={:.4}",
         iter, restarts, best_score
     );
+    on_update(&SearchUpdate {
+        iter, restarts, current_score, best_score,
+        best_layout: best.clone(),
+        phase: SearchPhase::Finished,
+    });
     best
 }
 

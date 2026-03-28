@@ -318,6 +318,75 @@ fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
     }
 }
 
+/// スコア内訳の構造体（GUI 表示用）
+#[derive(Clone, Debug, Default)]
+pub struct ScoreBreakdown {
+    pub total: f64,
+    pub stroke_cost: f64,
+    pub uni_cost: f64,
+    pub bi_cost: f64,
+    pub tri_cost: f64,
+    pub total_strokes: f64,
+    pub l1_coverage: f64,
+    /// 指別負荷 [0..8]: 左小指, 左薬指, 左中指, 左人差し指, 右人差し指, 右中指, 右薬指, 右小指
+    pub finger_load: [f64; 8],
+}
+
+/// スコア内訳を構造体として返す
+pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> ScoreBreakdown {
+    let nc = w.kp.num_chars;
+    let mut stroke_cost = 0.0;
+    let mut uni_cost = 0.0;
+    let mut bi_cost = 0.0;
+    let mut tri_cost = 0.0;
+    let mut total_strokes = 0.0;
+    let mut l1_coverage = 0.0;
+    let mut finger_load = [0.0f64; 8];
+
+    for c in 0..nc as CharId {
+        let freq = corpus.unigrams[c as usize];
+        if freq == 0.0 { continue; }
+        let strokes = layout.char_stroke_count(c);
+        stroke_cost += freq * strokes as f64 * w.stroke_scale;
+        total_strokes += freq * strokes as f64;
+        let slot = layout.char_to_slot[c as usize];
+        uni_cost += freq * unigram_cost_for_slot(slot, w);
+        if strokes == 1 { l1_coverage += freq; }
+        // 指負荷: 文字キーのカラムから指番号を決定
+        let physical_slot = if (slot as usize) < w.kp.num_slots_per_layer as usize {
+            slot
+        } else {
+            slot - w.kp.num_slots_per_layer
+        };
+        let finger = col_to_finger(slot_col(physical_slot, w.kp.num_cols)) as usize;
+        finger_load[finger] += freq;
+    }
+    for bg in &corpus.bigrams {
+        if bg.freq == 0.0 { continue; }
+        let s1 = layout.char_to_slot[bg.c1 as usize];
+        let s2 = layout.char_to_slot[bg.c2 as usize];
+        bi_cost += bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
+    }
+    for tg in &corpus.trigrams {
+        if tg.freq == 0.0 { continue; }
+        let h1 = layout.primary_hand(tg.c1);
+        let h2 = layout.primary_hand(tg.c2);
+        let h3 = layout.primary_hand(tg.c3);
+        tri_cost += tg.freq * quasi_alt_bonus(h1, h2, h3, w);
+    }
+
+    ScoreBreakdown {
+        total: stroke_cost + uni_cost + bi_cost + tri_cost,
+        stroke_cost,
+        uni_cost,
+        bi_cost,
+        tri_cost,
+        total_strokes,
+        l1_coverage,
+        finger_load,
+    }
+}
+
 /// スコアの内訳を表示
 pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut impl Write) {
     let nc = w.kp.num_chars;

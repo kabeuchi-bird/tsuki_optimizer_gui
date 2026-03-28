@@ -3,11 +3,21 @@ name = "tsuki_optimize"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "tsuki_optimize"
+path = "src/main.rs"
+
+[[bin]]
+name = "gui"
+path = "src/bin/gui.rs"
+
 [dependencies]
 rand  = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1", features = ["derive"] }
 toml         = "0.8"
 signal-hook  = "0.3"
+eframe       = "0.31"
+egui_plot    = "0.31"
 
 [profile.release]
 opt-level = 3
