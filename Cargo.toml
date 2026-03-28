@@ -15,9 +15,11 @@ path = "src/bin/gui.rs"
 rand  = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1", features = ["derive"] }
 toml         = "0.8"
-signal-hook  = "0.3"
 eframe       = "0.31"
 egui_plot    = "0.31"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook  = "0.3"
 
 [profile.release]
 opt-level = 3

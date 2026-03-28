@@ -14,6 +14,7 @@ use egui_plot::{Line, PlotPoints, VLine};
 use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
+use tsuki_optimize::cost::{score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, slot_col, KeyboardParams, KeyboardSize, SHIFT_SLOT_SENTINEL,
 };
@@ -67,6 +68,10 @@ struct App {
     // 最新の探索状態
     latest_update: Option<SearchUpdate>,
 
+    // スコア内訳表示用（探索開始時にコピーを保持）
+    corpus: Option<Corpus>,
+    weights: Option<Weights>,
+
     // スコア推移グラフ用データ
     score_history: Vec<(f64, f64)>,       // (iter, current_score)
     best_history: Vec<(f64, f64)>,        // (iter, best_score)
@@ -89,6 +94,8 @@ impl App {
             rx: None,
             running: false,
             latest_update: None,
+            corpus: None,
+            weights: None,
             score_history: Vec::new(),
             best_history: Vec::new(),
             restart_iters: Vec::new(),
@@ -130,6 +137,10 @@ impl App {
         } else {
             Corpus::from_str(SAMPLE_CORPUS)
         };
+
+        // GUI側でスコア内訳計算用にコピーを保持
+        self.corpus = Some(corpus.clone());
+        self.weights = Some(weights.clone());
 
         // 状態リセット
         self.score_history.clear();
@@ -532,6 +543,38 @@ impl App {
             ui.separator();
             ui.label(format!("再起動回数: {}", upd.restarts));
         });
+
+        // スコア内訳パネル
+        if let (Some(ref corpus), Some(ref weights)) = (&self.corpus, &self.weights) {
+            let bd = score_breakdown_data(&upd.best_layout, corpus, weights);
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("スコア内訳（最良解）").strong().size(14.0));
+            egui::Grid::new("breakdown_grid")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("打鍵数コスト:");
+                    ui.label(format!("{:.4}  （平均打鍵数 {:.4}, 1打鍵カバー率 {:.1}%）",
+                        bd.stroke_cost, bd.total_strokes, bd.l1_coverage * 100.0));
+                    ui.end_row();
+
+                    ui.label("難易度コスト:");
+                    ui.label(format!("{:.4}", bd.uni_cost));
+                    ui.end_row();
+
+                    ui.label("バイグラムコスト:");
+                    ui.label(format!("{:.4}", bd.bi_cost));
+                    ui.end_row();
+
+                    ui.label("準交互ボーナス:");
+                    ui.label(format!("{:.4}", bd.tri_cost));
+                    ui.end_row();
+
+                    ui.label("合計スコア:");
+                    ui.label(egui::RichText::new(format!("{:.4}", bd.total)).strong());
+                    ui.end_row();
+                });
+        }
     }
 
     // ── 色分けヘルパー ──
@@ -555,8 +598,11 @@ impl App {
                     freq_rank[c as usize] = rank as u8;
                 }
 
-                // スロット難易度ランク: slot_difficulty の値でソート
-                // （ConfigからWeightsを読み直せないので、位置ベースの近似を使用）
+                // スロット難易度ランク: 設計書では Weights.slot_difficulty を使う想定だが、
+                // slot_difficulty はスカラー配列でなく [row][col] の2次元構造であり、
+                // L2 スロットのペナルティも含めた総合的な順位付けが必要なため、
+                // ここでは行・列・レイヤーに基づく近似値で代用する。
+                // 実用上、ホーム段中央 > 上段 > 下段 > L2 の順序は slot_difficulty と一致する。
                 let mut slot_sorted: Vec<(u8, f64)> = (0..kp.num_slots as u8)
                     .filter(|&s| layout.slot_to_char[s as usize] != SHIFT_SLOT_SENTINEL)
                     .map(|s| {

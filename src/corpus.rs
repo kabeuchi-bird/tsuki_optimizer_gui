@@ -9,6 +9,7 @@ use crate::chars::{CharId, MAX_CHARS, build_char_to_id, decompose};
 /// ——————————————————————————————
 /// コーパス統計
 /// ——————————————————————————————
+#[derive(Clone)]
 pub struct Corpus {
     /// ユニグラム頻度（CharId → 正規化頻度）
     /// サイズは MAX_CHARS（64）。3x10 では [60..64] は 0.0。

@@ -29,9 +29,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use signal_hook::consts::{SIGINT, SIGUSR1};
-use signal_hook::flag;
-
 use tsuki_optimize::chars::CHAR_LIST;
 use tsuki_optimize::config::{Config, keyboard_size_str};
 use tsuki_optimize::corpus::Corpus;
@@ -214,11 +211,16 @@ fn main() {
 
     // ── シグナルハンドラ登録 ─────────────────────
     let stop_flag = Arc::new(AtomicBool::new(false));
-    flag::register(SIGINT, Arc::clone(&stop_flag))
-        .expect("SIGINTハンドラの登録に失敗しました");
     let report_flag = Arc::new(AtomicBool::new(false));
-    flag::register(SIGUSR1, Arc::clone(&report_flag))
-        .expect("SIGUSR1ハンドラの登録に失敗しました");
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::{SIGINT, SIGUSR1};
+        use signal_hook::flag;
+        flag::register(SIGINT, Arc::clone(&stop_flag))
+            .expect("SIGINTハンドラの登録に失敗しました");
+        flag::register(SIGUSR1, Arc::clone(&report_flag))
+            .expect("SIGUSR1ハンドラの登録に失敗しました");
+    }
 
     // ── タブーサーチ ─────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
