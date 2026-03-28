@@ -11,12 +11,11 @@ use eframe::egui;
 use egui::epaint::StrokeKind;
 use egui_plot::{Line, PlotPoints, VLine};
 
-use tsuki_optimize::chars::{CharId, CHAR_LIST, VOID_CHAR_FIRST};
+use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::ScoreBreakdown;
 use tsuki_optimize::layout::{
-    col_to_finger, slot_col, KeyboardParams, KeyboardSize, Layout, SHIFT_SLOT_SENTINEL,
+    col_to_finger, slot_col, KeyboardParams, KeyboardSize, SHIFT_SLOT_SENTINEL,
 };
 use tsuki_optimize::search::{
     self, SearchContext, SearchPhase, SearchUpdate,
@@ -67,7 +66,6 @@ struct App {
 
     // 最新の探索状態
     latest_update: Option<SearchUpdate>,
-    breakdown: Option<ScoreBreakdown>,
 
     // スコア推移グラフ用データ
     score_history: Vec<(f64, f64)>,       // (iter, current_score)
@@ -91,7 +89,6 @@ impl App {
             rx: None,
             running: false,
             latest_update: None,
-            breakdown: None,
             score_history: Vec::new(),
             best_history: Vec::new(),
             restart_iters: Vec::new(),
@@ -139,7 +136,6 @@ impl App {
         self.best_history.clear();
         self.restart_iters.clear();
         self.latest_update = None;
-        self.breakdown = None;
         self.stop_flag.store(false, Ordering::Relaxed);
         self.running = true;
 
@@ -204,16 +200,6 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_updates();
-
-        // スコア内訳を計算（表示用、毎フレームではなく更新時のみ）
-        if let Some(ref upd) = self.latest_update {
-            if self.breakdown.is_none() || self.breakdown.as_ref().map(|b| b.total) != Some(upd.best_score) {
-                // breakdown を再計算するには corpus/weights が必要だが、
-                // 探索スレッド側で持っているためここでは簡易的にスキップし、
-                // GUI上ではスコアの数値のみ表示する
-                // TODO: SearchUpdate に ScoreBreakdown を含める方式に改善可能
-            }
-        }
 
         // ── ツールバー ──
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -327,15 +313,8 @@ impl App {
         let nc = kp.num_cols as usize;
         let npl = kp.num_slots_per_layer as usize;
 
-        // 頻度の最大値を取得（色分け用）
-        let max_freq = self.get_max_freq(layout);
-
-        // 頻度ランクと難易度ランクを計算（フィットネスマップ用）
-        let (freq_ranks, diff_ranks) = if self.color_mode == ColorMode::Fitness {
-            self.compute_fitness_ranks(layout)
-        } else {
-            (vec![], vec![])
-        };
+        // 色分けに必要な事前計算
+        let color_data = self.precompute_color_data(upd);
 
         let layers: &[(&str, usize)] = if self.show_layer2 {
             &[("Layer 1", 0), ("Layer 2", npl)]
@@ -374,17 +353,7 @@ impl App {
                         } else if char_id == SHIFT_SLOT_SENTINEL || char_id >= VOID_CHAR_FIRST {
                             egui::Color32::from_rgb(200, 200, 200)
                         } else {
-                            match self.color_mode {
-                                ColorMode::Fitness => {
-                                    self.fitness_color(char_id, &freq_ranks, &diff_ranks)
-                                }
-                                ColorMode::Frequency => {
-                                    self.frequency_color(char_id, layout, max_freq)
-                                }
-                                ColorMode::FingerLoad => {
-                                    egui::Color32::from_rgb(220, 220, 220)
-                                }
-                            }
+                            self.char_color(char_id, &color_data)
                         };
 
                         let is_l2 = slot_offset > 0;
@@ -446,20 +415,20 @@ impl App {
         let layout = &upd.best_layout;
         let kp = layout.kp;
 
-        // 指別負荷を計算
+        // 指別負荷を計算（実際のコーパス頻度を使用）
         let mut finger_load = [0.0f64; 8];
         for c in 0..kp.num_chars as CharId {
-            let slot = layout.char_to_slot[c as usize];
             if c >= VOID_CHAR_FIRST { continue; }
+            let freq = upd.unigrams[c as usize];
+            if freq == 0.0 { continue; }
+            let slot = layout.char_to_slot[c as usize];
             let physical = if (slot as usize) < kp.num_slots_per_layer as usize {
                 slot
             } else {
                 slot - kp.num_slots_per_layer
             };
             let finger = col_to_finger(slot_col(physical, kp.num_cols)) as usize;
-            // 簡易的に unigram 頻度は持っていないため、均等扱い
-            // SearchUpdate に corpus 頻度データを含めることで改善可能
-            finger_load[finger] += 1.0;
+            finger_load[finger] += freq;
         }
 
         let finger_names = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
@@ -493,7 +462,7 @@ impl App {
                 ui.painter().text(
                     rect.min + egui::vec2(bar_width + 4.0, 9.0),
                     egui::Align2::LEFT_CENTER,
-                    format!("{:.0}", load),
+                    format!("{:.1}%", load * 100.0),
                     egui::FontId::proportional(11.0),
                     egui::Color32::GRAY,
                 );
@@ -559,82 +528,119 @@ impl App {
 
     // ── 色分けヘルパー ──
 
-    fn get_max_freq(&self, _layout: &Layout) -> f64 {
-        // SearchUpdate 内に頻度情報がないため、文字位置のみで近似
-        // 実際の頻度データは探索スレッド内にあるので、ここでは均一とする
-        1.0
-    }
-
-    fn frequency_color(&self, _char_id: CharId, layout: &Layout, _max_freq: f64) -> egui::Color32 {
-        // L1 文字は暖色（高頻度寄り）、L2 文字は寒色
-        let slot = layout.char_to_slot[_char_id as usize];
-        let is_l1 = (slot as usize) < layout.kp.num_slots_per_layer as usize;
-        if is_l1 {
-            // 暖色: オレンジ〜赤
-            egui::Color32::from_rgb(255, 160, 80)
-        } else {
-            // 寒色: 青
-            egui::Color32::from_rgb(100, 140, 220)
-        }
-    }
-
-    fn compute_fitness_ranks(&self, layout: &Layout) -> (Vec<(CharId, usize)>, Vec<(u8, usize)>) {
-        // 簡易版: 文字IDの並び順をそのまま頻度ランクとし、
-        // slot_difficulty に基づくスロットランクと比較する
+    /// 色分けに必要な事前計算データ
+    fn precompute_color_data(&self, upd: &SearchUpdate) -> ColorData {
+        let layout = &upd.best_layout;
         let kp = layout.kp;
         let nc = kp.num_chars;
 
-        // 文字をスロット順（L1先頭, L2末尾）でランク付け
-        let mut chars_with_slot: Vec<(CharId, u8)> = (0..nc as CharId)
-            .filter(|&c| c < VOID_CHAR_FIRST)
-            .map(|c| (c, layout.char_to_slot[c as usize]))
-            .collect();
-        // スロット番号が小さいほうが先 → L1優先
-        chars_with_slot.sort_by_key(|&(_, s)| s);
-        let freq_ranks: Vec<(CharId, usize)> = chars_with_slot.iter()
-            .enumerate()
-            .map(|(rank, &(c, _))| (c, rank))
-            .collect();
+        match self.color_mode {
+            ColorMode::Fitness => {
+                // 頻度ランク（降順: 最頻出=0）と難易度ランク（昇順: 最も打ちやすい=0）を計算
+                let mut freq_sorted: Vec<(CharId, f64)> = (0..nc as CharId)
+                    .filter(|&c| c < VOID_CHAR_FIRST)
+                    .map(|c| (c, upd.unigrams[c as usize]))
+                    .collect();
+                freq_sorted.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+                let mut freq_rank = [0u8; MAX_CHARS];
+                for (rank, &(c, _)) in freq_sorted.iter().enumerate() {
+                    freq_rank[c as usize] = rank as u8;
+                }
 
-        (freq_ranks, vec![])
-    }
+                // スロット難易度ランク: slot_difficulty の値でソート
+                // （ConfigからWeightsを読み直せないので、位置ベースの近似を使用）
+                let mut slot_sorted: Vec<(u8, f64)> = (0..kp.num_slots as u8)
+                    .filter(|&s| layout.slot_to_char[s as usize] != SHIFT_SLOT_SENTINEL)
+                    .map(|s| {
+                        let physical = if (s as usize) < kp.num_slots_per_layer as usize {
+                            s
+                        } else {
+                            s - kp.num_slots_per_layer
+                        };
+                        let r = (physical as usize % (kp.num_cols as usize * 3)) / kp.num_cols as usize;
+                        let c = slot_col(physical, kp.num_cols) as usize;
+                        // L2スロットは追加ペナルティ（2打鍵なので打ちにくい）
+                        let l2_penalty = if (s as usize) >= kp.num_slots_per_layer as usize { 3.0 } else { 0.0 };
+                        // 行・列ベースの簡易難易度
+                        let row_d = [1.3, 0.9, 1.5][r];
+                        let center = (kp.num_cols as f64 - 1.0) / 2.0;
+                        let col_d = ((c as f64 - center).abs() / center) * 0.8;
+                        (s, row_d + col_d + l2_penalty)
+                    })
+                    .collect();
+                slot_sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+                let mut slot_rank = [0u8; 66]; // MAX_SLOTS
+                for (rank, &(s, _)) in slot_sorted.iter().enumerate() {
+                    slot_rank[s as usize] = rank as u8;
+                }
 
-    fn fitness_color(&self, char_id: CharId, _freq_ranks: &[(CharId, usize)], _diff_ranks: &[(u8, usize)]) -> egui::Color32 {
-        // 簡易版: L1にいる文字は緑（良い配置）、L2は黄〜赤
-        if let Some(ref upd) = self.latest_update {
-            let layout = &upd.best_layout;
-            let slot = layout.char_to_slot[char_id as usize];
-            let npl = layout.kp.num_slots_per_layer as usize;
-            if (slot as usize) < npl {
-                // L1: 中心に近いほど緑
-                let col = slot_col(slot, layout.kp.num_cols);
-                let nc = layout.kp.num_cols;
-                let center_dist = ((col as f32 - (nc as f32 - 1.0) / 2.0).abs() / (nc as f32 / 2.0)).min(1.0);
-                let row = (slot as usize % (nc as usize * 3)) / nc as usize;
-                let row_penalty = if row == 1 { 0.0 } else { 0.2 };
-                let fitness = (center_dist + row_penalty).min(1.0);
-
-                // 緑(良) → 黄(普通)
-                let r = (46.0 + fitness * 209.0) as u8;
-                let g = (160.0 + fitness * 95.0) as u8;
-                let b = (67.0 + fitness * 133.0) as u8;
-                egui::Color32::from_rgb(r, g, b.min(200))
-            } else {
-                // L2: 黄〜赤
-                let physical = slot - layout.kp.num_slots_per_layer;
-                let col = slot_col(physical, layout.kp.num_cols);
-                let nc = layout.kp.num_cols;
-                let center_dist = ((col as f32 - (nc as f32 - 1.0) / 2.0).abs() / (nc as f32 / 2.0)).min(1.0);
-
-                let r = (255.0 - center_dist * 35.0) as u8;
-                let g = (255.0 - center_dist * 95.0 - 55.0) as u8;
-                let b = (200.0 - center_dist * 120.0) as u8;
-                egui::Color32::from_rgb(r, g, b)
+                ColorData::Fitness { freq_rank, slot_rank, num_valid: freq_sorted.len() as f32 }
             }
-        } else {
-            egui::Color32::from_rgb(220, 220, 220)
+            ColorMode::Frequency => {
+                let max_freq = upd.unigrams.iter().cloned().fold(0.0f64, f64::max).max(1e-10);
+                ColorData::Frequency { max_freq }
+            }
+            ColorMode::FingerLoad => ColorData::None,
         }
     }
+
+    /// 1文字の色を計算
+    fn char_color(&self, char_id: CharId, data: &ColorData) -> egui::Color32 {
+        match data {
+            ColorData::Fitness { freq_rank, slot_rank, num_valid } => {
+                let upd = self.latest_update.as_ref().unwrap();
+                let slot = upd.best_layout.char_to_slot[char_id as usize];
+                let fr = freq_rank[char_id as usize] as f32;
+                let sr = slot_rank[slot as usize] as f32;
+                // ズレ = |頻度ランク - 難易度ランク| / 有効文字数
+                let mismatch = (fr - sr).abs() / num_valid;
+                // 0.0（良い配置）→ 緑, 0.5 → 黄, 1.0（悪い配置）→ 赤
+                let t = mismatch.min(1.0);
+                if t < 0.5 {
+                    // 緑 → 黄
+                    let s = t * 2.0;
+                    egui::Color32::from_rgb(
+                        (46.0 + s * 209.0) as u8,
+                        (160.0 + s * 95.0) as u8,
+                        (67.0 - s * 67.0) as u8,
+                    )
+                } else {
+                    // 黄 → 赤
+                    let s = (t - 0.5) * 2.0;
+                    egui::Color32::from_rgb(
+                        (255.0 - s * 35.0) as u8,
+                        (255.0 - s * 205.0) as u8,
+                        0,
+                    )
+                }
+            }
+            ColorData::Frequency { max_freq } => {
+                let upd = self.latest_update.as_ref().unwrap();
+                let freq = upd.unigrams[char_id as usize];
+                let t = (freq / max_freq).min(1.0) as f32;
+                // 低頻度（青紫）→ 高頻度（赤オレンジ）
+                egui::Color32::from_rgb(
+                    (80.0 + t * 175.0) as u8,
+                    (100.0 + t * 60.0 - t * t * 120.0) as u8,
+                    (220.0 - t * 200.0) as u8,
+                )
+            }
+            ColorData::None => egui::Color32::from_rgb(220, 220, 220),
+        }
+    }
+}
+
+/// 色分けモードの事前計算データ
+enum ColorData {
+    Fitness {
+        freq_rank: [u8; MAX_CHARS],
+        slot_rank: [u8; 66],
+        num_valid: f32,
+    },
+    Frequency {
+        max_freq: f64,
+    },
+    None,
 }
 
 const SAMPLE_CORPUS: &str = "\
