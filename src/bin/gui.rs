@@ -158,7 +158,6 @@ impl App {
             let initial = search::build_initial_layout(&ctx, kp, &mut std::io::sink());
             let report_flag = Arc::new(AtomicBool::new(false));
 
-            let tx_clone = tx.clone();
             search::run(
                 initial,
                 &ctx,
@@ -167,7 +166,7 @@ impl App {
                 &stop_flag,
                 &report_flag,
                 &mut move |update: &SearchUpdate| {
-                    let _ = tx_clone.send(update.clone());
+                    let _ = tx.send(update.clone());
                 },
                 &mut std::io::sink(),
             );
@@ -180,18 +179,27 @@ impl App {
 
     fn poll_updates(&mut self) {
         if let Some(ref rx) = self.rx {
-            // drain all pending updates
-            while let Ok(update) = rx.try_recv() {
-                let iter = update.iter as f64;
-                self.score_history.push((iter, update.current_score));
-                self.best_history.push((iter, update.best_score));
-                if update.phase == SearchPhase::Restarting {
-                    self.restart_iters.push(iter);
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => {
+                        let iter = update.iter as f64;
+                        self.score_history.push((iter, update.current_score));
+                        self.best_history.push((iter, update.best_score));
+                        if update.phase == SearchPhase::Restarting {
+                            self.restart_iters.push(iter);
+                        }
+                        if update.phase == SearchPhase::Finished {
+                            self.running = false;
+                        }
+                        self.latest_update = Some(update);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Search thread exited (finished or panicked)
+                        self.running = false;
+                        break;
+                    }
                 }
-                if update.phase == SearchPhase::Finished {
-                    self.running = false;
-                }
-                self.latest_update = Some(update);
             }
         }
     }
@@ -432,7 +440,7 @@ impl App {
         }
 
         let finger_names = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
-        let max_load = finger_load.iter().cloned().fold(0.0f64, f64::max).max(1.0);
+        let max_load = finger_load.iter().cloned().fold(0.0f64, f64::max).max(1e-10);
 
         ui.label(egui::RichText::new("指負荷バランス").strong().size(14.0));
         ui.add_space(8.0);
