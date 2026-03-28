@@ -147,13 +147,19 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
     let ks1 = keystrokes_for_slot(slot1, w.kp);
     let ks2 = keystrokes_for_slot(slot2, w.kp);
     let mut cost = key_pair_cost(ks1.last(), ks2.first(), w);
-    // L2配置の濁音基音 → ゛ 打鍵数削減ボーナス（1打鍵分）
+    // L2配置の濁音基音 → ゛ のとき、シフトキー1打鍵分（打鍵数コスト + シフトキー難度）を削減
+    // （シフトキー→対象文字→゛ 打鍵列においてシフトキーを不要と見なす）
+    // ks1 = [shift_slot, physical_slot]（L2の場合）なので ks1.first() = シフトキースロット
     // delta_score() は slot_after_swap() で仮スロットを渡すため追加実装不要
     if c2 == DAKUTEN_ID
         && w.daku_l2_trigger[c1 as usize]
         && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
     {
-        cost -= w.stroke_scale;
+        let nc = w.kp.num_cols;
+        let shift_slot = ks1.first();
+        let shift_diff = w.slot_difficulty[slot_row(shift_slot, nc) as usize]
+                                          [slot_col(shift_slot, nc) as usize];
+        cost -= w.stroke_scale + shift_diff;
     }
     cost
 }
