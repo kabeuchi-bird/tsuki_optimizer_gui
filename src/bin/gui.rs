@@ -227,10 +227,8 @@ impl eframe::App for App {
                     if ui.button("⏹ 停止").clicked() {
                         self.stop_search();
                     }
-                } else {
-                    if ui.button("▶ 開始").clicked() {
-                        self.start_search();
-                    }
+                } else if ui.button("▶ 開始").clicked() {
+                    self.start_search();
                 }
 
                 ui.separator();
