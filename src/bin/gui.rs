@@ -807,8 +807,9 @@ impl App {
                 let slot = upd.best_layout.char_to_slot[char_id as usize];
                 let fr = freq_rank[char_id as usize] as f32;
                 let sr = slot_rank[slot as usize] as f32;
-                // ズレ = |頻度ランク - 難易度ランク| / 有効文字数
-                let mismatch = (fr - sr).abs() / num_valid;
+                // ズレ = |頻度ランク - 難易度ランク| / (有効文字数 * 0.3)
+                // 係数 0.3 で感度を上げ、小さなズレでも黄〜赤に変化するようにする
+                let mismatch = (fr - sr).abs() / (num_valid * 0.3);
                 // 0.0（良い配置）→ 緑, 0.5 → 黄, 1.0（悪い配置）→ 赤
                 let t = mismatch.min(1.0);
                 if t < 0.5 {
