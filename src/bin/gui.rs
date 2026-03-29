@@ -829,13 +829,26 @@ impl App {
             ColorData::Frequency { max_freq } => {
                 let upd = self.latest_update.as_ref().unwrap();
                 let freq = upd.unigrams[char_id as usize];
-                let t = (freq / max_freq).min(1.0) as f32;
-                // 低頻度（青紫）→ 高頻度（赤オレンジ）
-                egui::Color32::from_rgb(
-                    (80.0 + t * 175.0) as u8,
-                    (100.0 + t * 60.0 - t * t * 120.0) as u8,
-                    (220.0 - t * 200.0) as u8,
-                )
+                let ratio = (freq / max_freq).min(1.0);
+                // 対数スケールで低頻度域の差を見やすくする
+                // log(1 + ratio*99) / log(100) → 0.0〜1.0 に非線形マッピング
+                let t = ((1.0 + ratio * 99.0).ln() / 100.0f64.ln()) as f32;
+                // 低頻度（淡い青）→ 中頻度（紫〜ピンク）→ 高頻度（赤オレンジ）
+                if t < 0.5 {
+                    let s = t * 2.0;
+                    egui::Color32::from_rgb(
+                        (100.0 + s * 100.0) as u8,
+                        (140.0 - s * 60.0) as u8,
+                        (220.0 - s * 40.0) as u8,
+                    )
+                } else {
+                    let s = (t - 0.5) * 2.0;
+                    egui::Color32::from_rgb(
+                        (200.0 + s * 55.0) as u8,
+                        (80.0 + s * 40.0) as u8,
+                        (180.0 - s * 160.0) as u8,
+                    )
+                }
             }
             ColorData::None => egui::Color32::from_rgb(220, 220, 220),
         }
