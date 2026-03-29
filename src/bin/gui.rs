@@ -16,7 +16,7 @@ use egui_plot::{Line, PlotPoints, VLine};
 use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{score_breakdown_data, Weights};
+use tsuki_optimize::cost::{score, score_breakdown, score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, slot_col, KeyboardParams, KeyboardSize, SHIFT_SLOT_SENTINEL,
 };
@@ -223,16 +223,19 @@ impl App {
             };
 
             let mut rng = SmallRng::seed_from_u64(seed);
+            let l1_only = toml_config.build_l1_only_set();
             let ctx = SearchContext {
                 corpus: &corpus,
                 weights: &weights,
                 pairs: &exclusive_pairs,
+                l1_only: &l1_only,
             };
 
             let initial = search::build_initial_layout(&ctx, kp, &mut log_writer);
+            let initial_score = score(&initial, &corpus, &weights);
             let report_flag = Arc::new(AtomicBool::new(false));
 
-            search::run(
+            let best_layout = search::run(
                 initial,
                 &ctx,
                 &search_config,
@@ -244,6 +247,22 @@ impl App {
                 },
                 &mut log_writer,
             );
+
+            // 最終結果をログに出力
+            use std::io::Write;
+            let _ = writeln!(log_writer, "\n【最適化結果】");
+            best_layout.display(&mut log_writer);
+            score_breakdown(&best_layout, &corpus, &weights, &mut log_writer);
+            let best_score = score(&best_layout, &corpus, &weights);
+            let _ = writeln!(log_writer, "\n初期スコア : {:.4}", initial_score);
+            let _ = writeln!(log_writer, "最良スコア : {:.4}", best_score);
+            let _ = writeln!(
+                log_writer,
+                "改善幅     : {:.4}  ({:.2}%)",
+                initial_score - best_score,
+                (initial_score - best_score) / initial_score.abs() * 100.0
+            );
+            let _ = log_writer.flush();
         });
     }
 
@@ -807,8 +826,9 @@ impl App {
                 let slot = upd.best_layout.char_to_slot[char_id as usize];
                 let fr = freq_rank[char_id as usize] as f32;
                 let sr = slot_rank[slot as usize] as f32;
-                // ズレ = |頻度ランク - 難易度ランク| / 有効文字数
-                let mismatch = (fr - sr).abs() / num_valid;
+                // ズレ = |頻度ランク - 難易度ランク| / (有効文字数 * 0.3)
+                // 係数 0.3 で感度を上げ、小さなズレでも黄〜赤に変化するようにする
+                let mismatch = (fr - sr).abs() / (num_valid * 0.3);
                 // 0.0（良い配置）→ 緑, 0.5 → 黄, 1.0（悪い配置）→ 赤
                 let t = mismatch.min(1.0);
                 if t < 0.5 {
@@ -828,13 +848,26 @@ impl App {
             ColorData::Frequency { max_freq } => {
                 let upd = self.latest_update.as_ref().unwrap();
                 let freq = upd.unigrams[char_id as usize];
-                let t = (freq / max_freq).min(1.0) as f32;
-                // 低頻度（青紫）→ 高頻度（赤オレンジ）
-                egui::Color32::from_rgb(
-                    (80.0 + t * 175.0) as u8,
-                    (100.0 + t * 60.0 - t * t * 120.0) as u8,
-                    (220.0 - t * 200.0) as u8,
-                )
+                let ratio = (freq / max_freq).min(1.0);
+                // 対数スケールで低頻度域の差を見やすくする
+                // log(1 + ratio*99) / log(100) → 0.0〜1.0 に非線形マッピング
+                let t = ((1.0 + ratio * 99.0).ln() / 100.0f64.ln()) as f32;
+                // 低頻度（淡い青）→ 中頻度（紫〜ピンク）→ 高頻度（赤オレンジ）
+                if t < 0.5 {
+                    let s = t * 2.0;
+                    egui::Color32::from_rgb(
+                        (100.0 + s * 100.0) as u8,
+                        (140.0 - s * 60.0) as u8,
+                        (220.0 - s * 40.0) as u8,
+                    )
+                } else {
+                    let s = (t - 0.5) * 2.0;
+                    egui::Color32::from_rgb(
+                        (200.0 + s * 55.0) as u8,
+                        (80.0 + s * 40.0) as u8,
+                        (180.0 - s * 160.0) as u8,
+                    )
+                }
             }
             ColorData::None => egui::Color32::from_rgb(220, 220, 220),
         }

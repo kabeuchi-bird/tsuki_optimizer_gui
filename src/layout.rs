@@ -3,9 +3,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 
-use crate::chars::{
-    CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST,
-};
+use crate::chars::{CharId, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
 
 pub type SlotId = u8;
 
@@ -368,16 +366,10 @@ pub fn is_fixed(c: CharId, kp: KeyboardParams) -> bool {
     }
 }
 
-/// 文字cがLayer1専用（Layer2へ移動不可）かどうか
-#[inline]
-pub fn is_l1_only(c: CharId) -> bool {
-    c == DAKUTEN_ID || c == HANDAKUTEN_ID
-}
-
 /// 文字cが層間移動可能かどうか
 #[inline]
-pub fn is_inter_layer_movable(c: CharId, kp: KeyboardParams) -> bool {
-    !is_fixed(c, kp) && !is_l1_only(c)
+pub fn is_inter_layer_movable(c: CharId, kp: KeyboardParams, l1_only: &HashSet<CharId>) -> bool {
+    !is_fixed(c, kp) && !l1_only.contains(&c)
 }
 
 // ──────────────────────────────────────────────────────────────
