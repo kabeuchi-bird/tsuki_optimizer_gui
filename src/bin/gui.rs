@@ -33,8 +33,37 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "tsuki_optimize GUI",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| {
+            setup_japanese_fonts(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
     )
+}
+
+/// 日本語フォント（IPAゴシック）をバイナリに埋め込み、egui に登録する
+fn setup_japanese_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "ipag".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/ipag.ttf"
+        ))),
+    );
+
+    // Proportional / Monospace の両方で日本語フォントをフォールバックに追加
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("ipag".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("ipag".to_owned());
+
+    ctx.set_fonts(fonts);
 }
 
 // ──────────────────────────────────────────────────────────────

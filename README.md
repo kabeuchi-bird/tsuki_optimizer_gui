@@ -18,21 +18,54 @@
 
 シフトの方向：左手域のキーは右手側シフトキー（K/★）、右手域のキーは左手側シフトキー（D/☆）で入力します。
 
-## ビルド
+## ダウンロード
 
-Rust 1.73以降が必要です。
+ビルド済みバイナリは GitHub から直接ダウンロードできます。自分でビルドする必要はありません。
+
+### 手順
+
+1. GitHub のリポジトリページを開く
+2. 上部メニューの **「Actions」** タブをクリック
+3. 一覧から最新の（緑色のチェックマークが付いた）ワークフローをクリック
+4. ページ下部の **「Artifacts」** セクションに、OS 別の zip ファイルが表示される
+
+| ファイル名 | 対象OS |
+|-----------|--------|
+| `tsuki-optimizer-linux-x86_64` | Linux |
+| `tsuki-optimizer-windows-x86_64` | Windows |
+| `tsuki-optimizer-macos-arm64` | macOS (Apple Silicon) |
+
+5. 自分の OS に合ったファイルをクリックしてダウンロード
+6. zip を展開すると、以下のファイルが入っている
+
+| ファイル | 説明 |
+|---------|------|
+| `tsuki_optimize` (Windowsは `.exe`) | CLI版（コマンドラインで使う） |
+| `gui` (Windowsは `gui.exe`) | GUI版（ウィンドウで操作する） |
+| `tsuki_optimize.toml` | 設定ファイル（パラメータ調整用） |
+| `README.md` | このドキュメント |
+
+7. `gui`（または `gui.exe`）をダブルクリックすれば GUI が起動する
+
+> **注意**: ダウンロードには GitHub アカウントへのログインが必要です。
+
+### 自分でビルドする場合
+
+Rust 1.73 以降が必要です。
 
 ```bash
 cargo build --release
 ```
 
-### プラットフォームごとの注意
+ビルド後のバイナリは `target/release/` に生成されます。
 
-- **Linux**: eframe (egui) のビルドにシステムライブラリが必要です。
+#### プラットフォームごとの注意
+
+- **Linux**: GUI のビルドにシステムライブラリが必要です。
   ```bash
   sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev
   ```
-- **Windows**: 追加依存なし。CLIの `Ctrl+C` / `SIGUSR1` シグナルハンドラは無効になります（GUI の停止ボタンで代替）。
+- **Windows**: 追加依存なし。CLI の `Ctrl+C` / `SIGUSR1` シグナルハンドラは無効になります（GUI の停止ボタンで代替）。
 - **macOS**: 追加依存なし。
 
 ## 使い方
@@ -136,6 +169,3 @@ tsuki_optimize/
     └── config.rs              # TOML設定の読み込み
 ```
 
-## CI
-
-GitHub Actions で Linux / Windows / macOS の3プラットフォームビルドを実行します。ビルド成果物（バイナリ + 設定ファイル + README）は Actions の Summary ページからダウンロードできます。
