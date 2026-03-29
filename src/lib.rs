@@ -8,3 +8,8 @@ pub mod corpus;
 pub mod cost;
 pub mod layout;
 pub mod search;
+
+/// ローカルタイムのタイムスタンプ文字列（YYMMDD_HHMMSS）を生成する
+pub fn local_timestamp() -> String {
+    chrono::Local::now().format("%y%m%d_%H%M%S").to_string()
+}
