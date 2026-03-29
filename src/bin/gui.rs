@@ -97,6 +97,7 @@ struct App {
 
     // 最新の探索状態
     latest_update: Option<SearchUpdate>,
+    initial_score: Option<f64>,
 
     // スコア内訳表示用（探索開始時にコピーを保持）
     corpus: Option<Corpus>,
@@ -144,6 +145,7 @@ impl App {
             rx: None,
             running: false,
             latest_update: None,
+            initial_score: None,
             corpus: None,
             weights: None,
             log_rx: None,
@@ -204,6 +206,7 @@ impl App {
         self.best_history.clear();
         self.restart_iters.clear();
         self.latest_update = None;
+        self.initial_score = None;
         self.log_buffer.clear();
         self.stop_flag.store(false, Ordering::Relaxed);
         self.running = true;
@@ -294,6 +297,9 @@ impl App {
                         let iter = update.iter as f64;
                         self.score_history.push((iter, update.current_score));
                         self.best_history.push((iter, update.best_score));
+                        if self.initial_score.is_none() {
+                            self.initial_score = Some(update.current_score);
+                        }
                         if update.phase == SearchPhase::Restarting {
                             self.restart_iters.push(iter);
                         }
@@ -708,6 +714,13 @@ impl App {
             ui.label(format!("最良スコア: {:.4}", upd.best_score));
             ui.separator();
             ui.label(format!("現在スコア: {:.4}", upd.current_score));
+            if let Some(init) = self.initial_score {
+                if init > 0.0 {
+                    let improvement = (init - upd.best_score) / init * 100.0;
+                    ui.separator();
+                    ui.label(format!("改善率: {:.2}%", improvement));
+                }
+            }
             ui.separator();
             ui.label(format!("イテレーション: {}", upd.iter));
             ui.separator();
