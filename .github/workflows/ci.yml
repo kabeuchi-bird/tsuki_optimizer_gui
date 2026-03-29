@@ -13,17 +13,26 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: tsuki-optimizer-linux-x86_64
+            bin_suffix: ""
+          - os: windows-latest
+            artifact_name: tsuki-optimizer-windows-x86_64
+            bin_suffix: ".exe"
+          - os: macos-latest
+            artifact_name: tsuki-optimizer-macos-arm64
+            bin_suffix: ""
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -46,3 +55,18 @@ jobs:
 
       - name: Check clippy
         run: cargo clippy -- -D warnings
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/tsuki_optimize${{ matrix.bin_suffix }} dist/
+          cp target/release/gui${{ matrix.bin_suffix }} dist/
+          cp tsuki_optimize.toml dist/
+          cp README.md dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/
