@@ -133,7 +133,7 @@ impl App {
 
     fn start_search(&mut self) {
         // 設定読み込み
-        let config_path = Path::new("tsuki_optimize.toml");
+        let config_path = Path::new("config.toml");
         let toml_config = if config_path.exists() {
             Config::from_file(config_path).unwrap_or_default()
         } else {
@@ -339,20 +339,28 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 // 左側: キーボード表示
                 let kb_width = ui.available_width() * 0.45;
-                ui.allocate_ui(egui::vec2(kb_width, top_height), |ui| {
-                    if self.color_mode == ColorMode::FingerLoad {
-                        self.draw_finger_load(ui);
-                    } else {
-                        self.draw_keyboard(ui);
-                    }
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(kb_width, top_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if self.color_mode == ColorMode::FingerLoad {
+                            self.draw_finger_load(ui);
+                        } else {
+                            self.draw_keyboard(ui);
+                        }
+                    },
+                );
 
                 ui.separator();
 
                 // 右側: スコア推移グラフ
-                ui.allocate_ui(egui::vec2(ui.available_width(), top_height), |ui| {
-                    self.draw_score_graph(ui);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), top_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.draw_score_graph(ui);
+                    },
+                );
             });
 
             ui.separator();
