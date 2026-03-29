@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use crate::chars::{
-    CharId, MAX_CHARS, TOUTEN_ID, KUTEN_ID, DAKUTEN_ID, HANDAKUTEN_ID, VOID_CHAR_FIRST,
+    CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST,
 };
 
 pub type SlotId = u8;
@@ -25,7 +25,10 @@ pub const K_SLOT: SlotId = 17;
 // ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyboardSize { K3x10, K3x11 }
+pub enum KeyboardSize {
+    K3x10,
+    K3x11,
+}
 
 /// レイアウト計算に必要なキーボード形状パラメータ
 ///
@@ -58,8 +61,8 @@ impl KeyboardParams {
             num_slots_per_layer: 30,
             num_slots: 60,
             num_chars: 60,
-            shift_left:  D_SLOT,  // 12
-            shift_right: K_SLOT,  // 17
+            shift_left: D_SLOT,  // 12
+            shift_right: K_SLOT, // 17
         }
     }
 
@@ -74,8 +77,8 @@ impl KeyboardParams {
             num_slots_per_layer: 33,
             num_slots: 66,
             num_chars: 64,
-            shift_left:  13,  // ☆ (row1, col2)
-            shift_right: 18,  // ★ (row1, col7)
+            shift_left: 13,  // ☆ (row1, col2)
+            shift_right: 18, // ★ (row1, col7)
         }
     }
 }
@@ -85,11 +88,16 @@ impl KeyboardParams {
 // ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Hand { Left, Right }
+pub enum Hand {
+    Left,
+    Right,
+}
 
 /// スロット番号からカラム（0 〜 num_cols-1）を得る
 #[inline]
-pub fn slot_col(s: SlotId, num_cols: u8) -> u8 { s % num_cols }
+pub fn slot_col(s: SlotId, num_cols: u8) -> u8 {
+    s % num_cols
+}
 
 /// スロット番号からロウ（0=上段, 1=中段, 2=下段）を得る
 #[inline]
@@ -102,22 +110,26 @@ pub fn slot_row(s: SlotId, num_cols: u8) -> u8 {
 #[inline]
 pub fn col_to_finger(col: u8) -> u8 {
     match col {
-        0       => 0,  // 左小指
-        1       => 1,  // 左薬指
-        2       => 2,  // 左中指（☆/Dキー）
-        3 | 4   => 3,  // 左人差し指
-        5 | 6   => 4,  // 右人差し指
-        7       => 5,  // 右中指（★/Kキー）
-        8       => 6,  // 右薬指
-        9 | 10  => 7,  // 右小指（col10 は3x11の追加列）
-        _       => unreachable!(),
+        0 => 0,      // 左小指
+        1 => 1,      // 左薬指
+        2 => 2,      // 左中指（☆/Dキー）
+        3 | 4 => 3,  // 左人差し指
+        5 | 6 => 4,  // 右人差し指
+        7 => 5,      // 右中指（★/Kキー）
+        8 => 6,      // 右薬指
+        9 | 10 => 7, // 右小指（col10 は3x11の追加列）
+        _ => unreachable!(),
     }
 }
 
 /// スロットの手（左/右）
 #[inline]
 pub fn slot_hand(s: SlotId, num_cols: u8) -> Hand {
-    if slot_col(s, num_cols) < 5 { Hand::Left } else { Hand::Right }
+    if slot_col(s, num_cols) < 5 {
+        Hand::Left
+    } else {
+        Hand::Right
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -131,15 +143,31 @@ pub struct Keystrokes {
 
 impl Keystrokes {
     #[inline]
-    pub fn one(a: SlotId) -> Self { Keystrokes { data: [a, 0], len: 1 } }
+    pub fn one(a: SlotId) -> Self {
+        Keystrokes {
+            data: [a, 0],
+            len: 1,
+        }
+    }
     #[inline]
-    pub fn two(a: SlotId, b: SlotId) -> Self { Keystrokes { data: [a, b], len: 2 } }
+    pub fn two(a: SlotId, b: SlotId) -> Self {
+        Keystrokes {
+            data: [a, b],
+            len: 2,
+        }
+    }
     #[inline]
-    pub fn as_slice(&self) -> &[SlotId] { &self.data[..self.len as usize] }
+    pub fn as_slice(&self) -> &[SlotId] {
+        &self.data[..self.len as usize]
+    }
     #[inline]
-    pub fn first(&self) -> SlotId { self.data[0] }
+    pub fn first(&self) -> SlotId {
+        self.data[0]
+    }
     #[inline]
-    pub fn last(&self) -> SlotId { self.data[self.len as usize - 1] }
+    pub fn last(&self) -> SlotId {
+        self.data[self.len as usize - 1]
+    }
 }
 
 /// スロット番号からキーストロークを計算
@@ -153,7 +181,11 @@ pub fn keystrokes_for_slot(slot: SlotId, kp: KeyboardParams) -> Keystrokes {
         let physical = slot - kp.num_slots_per_layer;
         let col = slot_col(physical, kp.num_cols);
         // 左手キー → 右シフト（★）、右手キー → 左シフト（☆）
-        let shift = if col < 5 { kp.shift_right } else { kp.shift_left };
+        let shift = if col < 5 {
+            kp.shift_right
+        } else {
+            kp.shift_left
+        };
         Keystrokes::two(shift, physical)
     }
 }
@@ -199,12 +231,18 @@ impl Layout {
                     cts[char_id] = slot;
                     stc[slot as usize] = char_id as CharId;
                     char_id += 1;
-                    if char_id >= kp.num_chars { break; }
+                    if char_id >= kp.num_chars {
+                        break;
+                    }
                 }
             }
         }
 
-        Layout { kp, char_to_slot: cts, slot_to_char: stc }
+        Layout {
+            kp,
+            char_to_slot: cts,
+            slot_to_char: stc,
+        }
     }
 
     /// 文字c1とc2のスロットを交換する（制約チェックなし、search層で行う）
@@ -236,11 +274,11 @@ impl Layout {
     #[inline]
     pub fn char_stroke_count(&self, c: CharId) -> u32 {
         if self.kp.size == KeyboardSize::K3x10 && (c == KUTEN_ID || c == TOUTEN_ID) {
-            2  // K/D + Enter
+            2 // K/D + Enter
         } else if self.is_l1(c) {
             1
         } else {
-            2  // shift + key
+            2 // shift + key
         }
     }
 
@@ -257,14 +295,25 @@ impl Layout {
                 let slot = (row as usize) * nc + col;
                 // シフトキースロットは ☆/★ を表示
                 if self.kp.size == KeyboardSize::K3x11
-                    && (slot == self.kp.shift_left as usize
-                        || slot == self.kp.shift_right as usize)
+                    && (slot == self.kp.shift_left as usize || slot == self.kp.shift_right as usize)
                 {
-                    let sym = if slot == self.kp.shift_left as usize { '☆' } else { '★' };
+                    let sym = if slot == self.kp.shift_left as usize {
+                        '☆'
+                    } else {
+                        '★'
+                    };
                     let _ = write!(out, "{} ", sym);
                 } else {
                     let c = self.slot_to_char[slot];
-                    let _ = write!(out, "{} ", if c == SHIFT_SLOT_SENTINEL { '?' } else { CHAR_LIST[c as usize] });
+                    let _ = write!(
+                        out,
+                        "{} ",
+                        if c == SHIFT_SLOT_SENTINEL {
+                            '?'
+                        } else {
+                            CHAR_LIST[c as usize]
+                        }
+                    );
                 }
             }
             let _ = writeln!(out);
@@ -275,7 +324,15 @@ impl Layout {
             for col in 0..nc {
                 let slot = npl + (row as usize) * nc + col;
                 let c = self.slot_to_char[slot];
-                let _ = write!(out, "{} ", if c == SHIFT_SLOT_SENTINEL { '?' } else { CHAR_LIST[c as usize] });
+                let _ = write!(
+                    out,
+                    "{} ",
+                    if c == SHIFT_SLOT_SENTINEL {
+                        '?'
+                    } else {
+                        CHAR_LIST[c as usize]
+                    }
+                );
             }
             let _ = writeln!(out);
         }
@@ -347,14 +404,21 @@ impl ExclusivePair {
 fn char_at_slot_after_swap(layout: &Layout, c1: CharId, c2: CharId, slot: usize) -> CharId {
     let s1 = layout.char_to_slot[c1 as usize] as usize;
     let s2 = layout.char_to_slot[c2 as usize] as usize;
-    if slot == s1 { c2 } else if slot == s2 { c1 } else { layout.slot_to_char[slot] }
+    if slot == s1 {
+        c2
+    } else if slot == s2 {
+        c1
+    } else {
+        layout.slot_to_char[slot]
+    }
 }
 
 /// L1スロット l1_slot とその対応 L2スロット (l1_slot + npl) のペアが、
 /// スワップ (c1↔c2) 後に排他ペア制約を違反するか
 fn pair_violates_after_swap(
     layout: &Layout,
-    c1: CharId, c2: CharId,
+    c1: CharId,
+    c2: CharId,
     l1_slot: usize,
     pairs: &[ExclusivePair],
 ) -> bool {
@@ -363,17 +427,22 @@ fn pair_violates_after_swap(
     let l1_c = char_at_slot_after_swap(layout, c1, c2, l1_slot);
     let l2_c = char_at_slot_after_swap(layout, c1, c2, l2_slot);
     // SHIFT_SLOT_SENTINEL(255) も void chars(>=62) もここで除外される
-    if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST { return false; }
+    if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
+        return false;
+    }
     pairs.iter().any(|p| p.violates(l1_c, l2_c))
 }
 
 /// スワップ (c1↔c2) が排他ペア制約に違反するか（影響する最大2スロット列を確認）
 pub fn swap_would_violate(
     layout: &Layout,
-    c1: CharId, c2: CharId,
+    c1: CharId,
+    c2: CharId,
     pairs: &[ExclusivePair],
 ) -> bool {
-    if pairs.is_empty() { return false; }
+    if pairs.is_empty() {
+        return false;
+    }
     let npl = layout.kp.num_slots_per_layer as usize;
     let s1 = layout.char_to_slot[c1 as usize] as usize;
     let s2 = layout.char_to_slot[c2 as usize] as usize;
