@@ -173,7 +173,7 @@ fn main() {
 
     // ── ログファイル作成 + TeeWriter ─────────────
     let log_path = cli.get("--log").cloned().unwrap_or_else(|| {
-        let ts = utc_timestamp();
+        let ts = tsuki_optimize::local_timestamp();
         format!("log/{}.log", ts)
     });
 
@@ -334,37 +334,6 @@ fn parse_cli(args: &[String]) -> std::collections::HashMap<String, String> {
         }
     }
     map
-}
-
-/// UTC タイムスタンプ文字列（YYMMDD_HHMMSS）を生成する
-fn utc_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // Howard Hinnant's civil_from_days algorithm
-    let days = (secs / 86400) as i64;
-    let z = days + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1461 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    let tod = secs % 86400;
-    format!(
-        "{:02}{:02}{:02}_{:02}{:02}{:02}",
-        y % 100,
-        m,
-        d,
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
 }
 
 const SAMPLE_CORPUS: &str = "\

@@ -2,6 +2,8 @@
 //
 // eframe (egui) を使用し、最適化の進行をリアルタイム表示する。
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -74,6 +76,7 @@ enum ColorMode {
     Fitness,
     Frequency,
     FingerLoad,
+    Log,
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -99,6 +102,10 @@ struct App {
     corpus: Option<Corpus>,
     weights: Option<Weights>,
 
+    // ログ表示用
+    log_rx: Option<mpsc::Receiver<String>>,
+    log_buffer: String,
+
     // スコア推移グラフ用データ
     score_history: Vec<(f64, f64)>, // (iter, current_score)
     best_history: Vec<(f64, f64)>,  // (iter, best_score)
@@ -123,6 +130,8 @@ impl App {
             latest_update: None,
             corpus: None,
             weights: None,
+            log_rx: None,
+            log_buffer: String::new(),
             score_history: Vec::new(),
             best_history: Vec::new(),
             restart_iters: Vec::new(),
@@ -179,17 +188,39 @@ impl App {
         self.best_history.clear();
         self.restart_iters.clear();
         self.latest_update = None;
+        self.log_buffer.clear();
         self.stop_flag.store(false, Ordering::Relaxed);
         self.running = true;
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
+        // ログ用チャネル
+        let (log_tx, log_rx) = mpsc::channel();
+        self.log_rx = Some(log_rx);
+
+        // ログファイル作成
+        let log_path = format!("log/{}.log", tsuki_optimize::local_timestamp());
+        let log_file = {
+            if let Some(parent) = Path::new(&log_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match File::create(&log_path) {
+                Ok(f) => Some(BufWriter::new(f)),
+                Err(_) => None,
+            }
+        };
+
         let stop_flag = Arc::clone(&self.stop_flag);
 
         std::thread::spawn(move || {
             use rand::rngs::SmallRng;
             use rand::SeedableRng;
+
+            let mut log_writer = GuiLogWriter {
+                tx: log_tx,
+                file: log_file,
+            };
 
             let mut rng = SmallRng::seed_from_u64(seed);
             let ctx = SearchContext {
@@ -198,7 +229,7 @@ impl App {
                 pairs: &exclusive_pairs,
             };
 
-            let initial = search::build_initial_layout(&ctx, kp, &mut std::io::sink());
+            let initial = search::build_initial_layout(&ctx, kp, &mut log_writer);
             let report_flag = Arc::new(AtomicBool::new(false));
 
             search::run(
@@ -211,7 +242,7 @@ impl App {
                 &mut move |update: &SearchUpdate| {
                     let _ = tx.send(update.clone());
                 },
-                &mut std::io::sink(),
+                &mut log_writer,
             );
         });
     }
@@ -242,6 +273,21 @@ impl App {
                         self.running = false;
                         break;
                     }
+                }
+            }
+        }
+
+        // ログメッセージを drain
+        if let Some(ref log_rx) = self.log_rx {
+            while let Ok(text) = log_rx.try_recv() {
+                self.log_buffer.push_str(&text);
+            }
+            // メモリ上限（512KB）を超えたら先頭からトリミング
+            const MAX_LOG_SIZE: usize = 512 * 1024;
+            if self.log_buffer.len() > MAX_LOG_SIZE {
+                let trim_at = self.log_buffer.len() - MAX_LOG_SIZE;
+                if let Some(newline_pos) = self.log_buffer[trim_at..].find('\n') {
+                    self.log_buffer.drain(..trim_at + newline_pos + 1);
                 }
             }
         }
@@ -326,6 +372,7 @@ impl eframe::App for App {
                     ColorMode::FingerLoad,
                     "指負荷バランス",
                 );
+                ui.radio_value(&mut self.color_mode, ColorMode::Log, "ログ");
                 ui.separator();
                 ui.checkbox(&mut self.show_layer2, "Layer 2 表示");
             });
@@ -342,12 +389,10 @@ impl eframe::App for App {
                 ui.allocate_ui_with_layout(
                     egui::vec2(kb_width, top_height),
                     egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        if self.color_mode == ColorMode::FingerLoad {
-                            self.draw_finger_load(ui);
-                        } else {
-                            self.draw_keyboard(ui);
-                        }
+                    |ui| match self.color_mode {
+                        ColorMode::FingerLoad => self.draw_finger_load(ui),
+                        ColorMode::Log => self.draw_log(ui),
+                        _ => self.draw_keyboard(ui),
                     },
                 );
 
@@ -491,6 +536,20 @@ impl App {
 
             ui.add_space(6.0);
         }
+    }
+
+    fn draw_log(&self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("検索ログ").strong().size(14.0));
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.log_buffer.as_str())
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY),
+                );
+            });
     }
 
     fn draw_finger_load(&self, ui: &mut egui::Ui) {
@@ -732,7 +791,7 @@ impl App {
                     .max(1e-10);
                 ColorData::Frequency { max_freq }
             }
-            ColorMode::FingerLoad => ColorData::None,
+            ColorMode::FingerLoad | ColorMode::Log => ColorData::None,
         }
     }
 
@@ -793,6 +852,32 @@ enum ColorData {
         max_freq: f64,
     },
     None,
+}
+
+// ──────────────────────────────────────────────────────────────
+// GuiLogWriter: ログテキストを GUI チャネル + ファイルに書き込む
+// ──────────────────────────────────────────────────────────────
+struct GuiLogWriter {
+    tx: mpsc::Sender<String>,
+    file: Option<BufWriter<File>>,
+}
+
+impl Write for GuiLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        let _ = self.tx.send(text.into_owned());
+        if let Some(ref mut f) = self.file {
+            let _ = f.write_all(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut f) = self.file {
+            let _ = f.flush();
+        }
+        Ok(())
+    }
 }
 
 const SAMPLE_CORPUS: &str = "\
