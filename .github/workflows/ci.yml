@@ -62,7 +62,7 @@ jobs:
           mkdir -p dist
           cp target/release/tsuki_optimize${{ matrix.bin_suffix }} dist/
           cp target/release/gui${{ matrix.bin_suffix }} dist/
-          cp tsuki_optimize.toml dist/
+          cp config.toml dist/
           cp README.md dist/
 
       - name: Upload artifact

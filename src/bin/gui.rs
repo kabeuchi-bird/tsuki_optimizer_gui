@@ -133,7 +133,7 @@ impl App {
 
     fn start_search(&mut self) {
         // 設定読み込み
-        let config_path = Path::new("tsuki_optimize.toml");
+        let config_path = Path::new("config.toml");
         let toml_config = if config_path.exists() {
             Config::from_file(config_path).unwrap_or_default()
         } else {

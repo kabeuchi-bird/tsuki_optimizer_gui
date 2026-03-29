@@ -5,11 +5,11 @@
 //
 // 設定の優先順位（高 → 低）:
 //   1. CLIオプション
-//   2. TOMLファイル（--config で指定 or デフォルト: tsuki_optimize.toml）
+//   2. TOMLファイル（--config で指定 or デフォルト: config.toml）
 //   3. ハードコードされたデフォルト値
 //
 // CLIオプション:
-//   --config        <path>  設定ファイルのパス       (default: tsuki_optimize.toml)
+//   --config        <path>  設定ファイルのパス       (default: config.toml)
 //   --corpus        <path>  コーパスファイルパス     (toml: run.corpus)
 //   --seed          <n>     乱数シード               (toml: run.seed)
 //   --iter          <n>     最大イテレーション数     (toml: run.max_iter)
@@ -77,7 +77,7 @@ fn main() {
     let config_path_str = cli
         .get("--config")
         .map(|s| s.as_str())
-        .unwrap_or("tsuki_optimize.toml");
+        .unwrap_or("config.toml");
     let config_path = Path::new(config_path_str);
 
     let toml_config = if config_path.exists() {
@@ -92,7 +92,7 @@ fn main() {
             }
         }
     } else {
-        if config_path_str != "tsuki_optimize.toml" {
+        if config_path_str != "config.toml" {
             eprintln!(
                 "エラー: 設定ファイルが見つかりません: {}",
                 config_path.display()
