@@ -348,7 +348,13 @@ pub fn run(
             no_improve = 0;
 
             current = best.clone();
-            random_perturbation(&mut current, config.perturbation_swaps, rng, ctx.pairs, ctx.l1_only);
+            random_perturbation(
+                &mut current,
+                config.perturbation_swaps,
+                rng,
+                ctx.pairs,
+                ctx.l1_only,
+            );
             current_score = score(&current, ctx.corpus, ctx.weights);
 
             cur_tabu_l1 = config.tabu_l1;
@@ -733,4 +739,3 @@ pub fn build_initial_layout(
 
     layout
 }
-
