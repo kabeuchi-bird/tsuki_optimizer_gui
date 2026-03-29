@@ -18,9 +18,7 @@ use tsuki_optimize::cost::{score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, slot_col, KeyboardParams, KeyboardSize, SHIFT_SLOT_SENTINEL,
 };
-use tsuki_optimize::search::{
-    self, SearchContext, SearchPhase, SearchUpdate,
-};
+use tsuki_optimize::search::{self, SearchContext, SearchPhase, SearchUpdate};
 
 // ──────────────────────────────────────────────────────────────
 // メイン
@@ -73,9 +71,9 @@ struct App {
     weights: Option<Weights>,
 
     // スコア推移グラフ用データ
-    score_history: Vec<(f64, f64)>,       // (iter, current_score)
-    best_history: Vec<(f64, f64)>,        // (iter, best_score)
-    restart_iters: Vec<f64>,              // リスタート発生イテレーション
+    score_history: Vec<(f64, f64)>, // (iter, current_score)
+    best_history: Vec<(f64, f64)>,  // (iter, best_score)
+    restart_iters: Vec<f64>,        // リスタート発生イテレーション
 
     // 表示設定
     color_mode: ColorMode,
@@ -122,8 +120,12 @@ impl App {
         let mut search_config = toml_config.build_search_config();
         let weights = toml_config.build_weights(kp);
 
-        if let Ok(v) = self.iter_str.parse() { search_config.max_iter = v; }
-        if let Ok(v) = self.restart_str.parse() { search_config.restart_after = v; }
+        if let Ok(v) = self.iter_str.parse() {
+            search_config.max_iter = v;
+        }
+        if let Ok(v) = self.restart_str.parse() {
+            search_config.restart_after = v;
+        }
 
         let seed: u64 = if self.seed_str.is_empty() {
             rand::random()
@@ -133,7 +135,8 @@ impl App {
 
         let corpus_path = &self.corpus_path_str;
         let corpus = if Path::new(corpus_path).exists() {
-            Corpus::from_file(Path::new(corpus_path)).unwrap_or_else(|_| Corpus::from_str(SAMPLE_CORPUS))
+            Corpus::from_file(Path::new(corpus_path))
+                .unwrap_or_else(|_| Corpus::from_str(SAMPLE_CORPUS))
         } else {
             Corpus::from_str(SAMPLE_CORPUS)
         };
@@ -156,8 +159,8 @@ impl App {
         let stop_flag = Arc::clone(&self.stop_flag);
 
         std::thread::spawn(move || {
-            use rand::SeedableRng;
             use rand::rngs::SmallRng;
+            use rand::SeedableRng;
 
             let mut rng = SmallRng::seed_from_u64(seed);
             let ctx = SearchContext {
@@ -246,8 +249,16 @@ impl eframe::App for App {
                 egui::ComboBox::from_id_salt("kb_size")
                     .selected_text(&self.keyboard_size_str_input)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.keyboard_size_str_input, "3x10".to_string(), "3x10");
-                        ui.selectable_value(&mut self.keyboard_size_str_input, "3x11".to_string(), "3x11");
+                        ui.selectable_value(
+                            &mut self.keyboard_size_str_input,
+                            "3x10".to_string(),
+                            "3x10",
+                        );
+                        ui.selectable_value(
+                            &mut self.keyboard_size_str_input,
+                            "3x11".to_string(),
+                            "3x11",
+                        );
                     });
             });
         });
@@ -271,9 +282,21 @@ impl eframe::App for App {
             // 色分けモード選択
             ui.horizontal(|ui| {
                 ui.label("表示モード:");
-                ui.radio_value(&mut self.color_mode, ColorMode::Fitness, "フィットネスマップ");
-                ui.radio_value(&mut self.color_mode, ColorMode::Frequency, "頻度ヒートマップ");
-                ui.radio_value(&mut self.color_mode, ColorMode::FingerLoad, "指負荷バランス");
+                ui.radio_value(
+                    &mut self.color_mode,
+                    ColorMode::Fitness,
+                    "フィットネスマップ",
+                );
+                ui.radio_value(
+                    &mut self.color_mode,
+                    ColorMode::Frequency,
+                    "頻度ヒートマップ",
+                );
+                ui.radio_value(
+                    &mut self.color_mode,
+                    ColorMode::FingerLoad,
+                    "指負荷バランス",
+                );
                 ui.separator();
                 ui.checkbox(&mut self.show_layer2, "Layer 2 表示");
             });
@@ -358,7 +381,11 @@ impl App {
 
                         let char_id = layout.slot_to_char[slot];
                         let ch = if is_shift {
-                            if slot == kp.shift_left as usize { '☆' } else { '★' }
+                            if slot == kp.shift_left as usize {
+                                '☆'
+                            } else {
+                                '★'
+                            }
                         } else if char_id == SHIFT_SLOT_SENTINEL || char_id >= VOID_CHAR_FIRST {
                             '□'
                         } else {
@@ -381,7 +408,8 @@ impl App {
                         };
                         let stroke_width = if is_l2 { 1.0 } else { 2.0 };
 
-                        let (rect, _response) = ui.allocate_exact_size(cell_size, egui::Sense::hover());
+                        let (rect, _response) =
+                            ui.allocate_exact_size(cell_size, egui::Sense::hover());
                         let rect = rect.shrink(spacing * 0.5);
 
                         ui.painter().rect(
@@ -403,7 +431,11 @@ impl App {
                             );
                         }
 
-                        let text_color = if bg_color.r() as u32 + bg_color.g() as u32 + bg_color.b() as u32 > 400 {
+                        let text_color = if bg_color.r() as u32
+                            + bg_color.g() as u32
+                            + bg_color.b() as u32
+                            > 400
+                        {
                             egui::Color32::BLACK
                         } else {
                             egui::Color32::WHITE
@@ -435,9 +467,13 @@ impl App {
         // 指別負荷を計算（実際のコーパス頻度を使用）
         let mut finger_load = [0.0f64; 8];
         for c in 0..kp.num_chars as CharId {
-            if c >= VOID_CHAR_FIRST { continue; }
+            if c >= VOID_CHAR_FIRST {
+                continue;
+            }
             let freq = upd.unigrams[c as usize];
-            if freq == 0.0 { continue; }
+            if freq == 0.0 {
+                continue;
+            }
             let slot = layout.char_to_slot[c as usize];
             let physical = if (slot as usize) < kp.num_slots_per_layer as usize {
                 slot
@@ -448,8 +484,14 @@ impl App {
             finger_load[finger] += freq;
         }
 
-        let finger_names = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
-        let max_load = finger_load.iter().cloned().fold(0.0f64, f64::max).max(1e-10);
+        let finger_names = [
+            "左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小",
+        ];
+        let max_load = finger_load
+            .iter()
+            .cloned()
+            .fold(0.0f64, f64::max)
+            .max(1e-10);
 
         ui.label(egui::RichText::new("指負荷バランス").strong().size(14.0));
         ui.add_space(8.0);
@@ -470,7 +512,8 @@ impl App {
                     egui::Color32::from_rgb(70, 180, 120)
                 };
 
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_max_width, 18.0), egui::Sense::hover());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(bar_max_width, 18.0), egui::Sense::hover());
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(rect.min, egui::vec2(bar_width, 18.0)),
                     3.0,
@@ -495,12 +538,8 @@ impl App {
             return;
         }
 
-        let current_points: PlotPoints = self.score_history.iter()
-            .map(|&(x, y)| [x, y])
-            .collect();
-        let best_points: PlotPoints = self.best_history.iter()
-            .map(|&(x, y)| [x, y])
-            .collect();
+        let current_points: PlotPoints = self.score_history.iter().map(|&(x, y)| [x, y]).collect();
+        let best_points: PlotPoints = self.best_history.iter().map(|&(x, y)| [x, y]).collect();
 
         let current_line = Line::new(current_points)
             .name("current")
@@ -522,14 +561,16 @@ impl App {
                     plot_ui.vline(
                         VLine::new(restart_iter)
                             .color(egui::Color32::from_rgba_premultiplied(220, 80, 80, 100))
-                            .width(1.0)
+                            .width(1.0),
                     );
                 }
             });
     }
 
     fn draw_score_info(&self, ui: &mut egui::Ui) {
-        let Some(ref upd) = self.latest_update else { return; };
+        let Some(ref upd) = self.latest_update else {
+            return;
+        };
 
         ui.label(egui::RichText::new("スコア情報").strong().size(14.0));
         ui.horizontal(|ui| {
@@ -546,14 +587,22 @@ impl App {
         if let (Some(ref corpus), Some(ref weights)) = (&self.corpus, &self.weights) {
             let bd = score_breakdown_data(&upd.best_layout, corpus, weights);
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("スコア内訳（最良解）").strong().size(14.0));
+            ui.label(
+                egui::RichText::new("スコア内訳（最良解）")
+                    .strong()
+                    .size(14.0),
+            );
             egui::Grid::new("breakdown_grid")
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("打鍵数コスト:");
-                    ui.label(format!("{:.4}  （平均打鍵数 {:.4}, 1打鍵カバー率 {:.1}%）",
-                        bd.stroke_cost, bd.total_strokes, bd.l1_coverage * 100.0));
+                    ui.label(format!(
+                        "{:.4}  （平均打鍵数 {:.4}, 1打鍵カバー率 {:.1}%）",
+                        bd.stroke_cost,
+                        bd.total_strokes,
+                        bd.l1_coverage * 100.0
+                    ));
                     ui.end_row();
 
                     ui.label("難易度コスト:");
@@ -609,10 +658,15 @@ impl App {
                         } else {
                             s - kp.num_slots_per_layer
                         };
-                        let r = (physical as usize % (kp.num_cols as usize * 3)) / kp.num_cols as usize;
+                        let r =
+                            (physical as usize % (kp.num_cols as usize * 3)) / kp.num_cols as usize;
                         let c = slot_col(physical, kp.num_cols) as usize;
                         // L2スロットは追加ペナルティ（2打鍵なので打ちにくい）
-                        let l2_penalty = if (s as usize) >= kp.num_slots_per_layer as usize { 3.0 } else { 0.0 };
+                        let l2_penalty = if (s as usize) >= kp.num_slots_per_layer as usize {
+                            3.0
+                        } else {
+                            0.0
+                        };
                         // 行・列ベースの簡易難易度
                         let row_d = [1.3, 0.9, 1.5][r];
                         let center = (kp.num_cols as f64 - 1.0) / 2.0;
@@ -626,10 +680,19 @@ impl App {
                     slot_rank[s as usize] = rank as u8;
                 }
 
-                ColorData::Fitness { freq_rank, slot_rank, num_valid: freq_sorted.len() as f32 }
+                ColorData::Fitness {
+                    freq_rank,
+                    slot_rank,
+                    num_valid: freq_sorted.len() as f32,
+                }
             }
             ColorMode::Frequency => {
-                let max_freq = upd.unigrams.iter().cloned().fold(0.0f64, f64::max).max(1e-10);
+                let max_freq = upd
+                    .unigrams
+                    .iter()
+                    .cloned()
+                    .fold(0.0f64, f64::max)
+                    .max(1e-10);
                 ColorData::Frequency { max_freq }
             }
             ColorMode::FingerLoad => ColorData::None,
@@ -639,7 +702,11 @@ impl App {
     /// 1文字の色を計算
     fn char_color(&self, char_id: CharId, data: &ColorData) -> egui::Color32 {
         match data {
-            ColorData::Fitness { freq_rank, slot_rank, num_valid } => {
+            ColorData::Fitness {
+                freq_rank,
+                slot_rank,
+                num_valid,
+            } => {
                 let upd = self.latest_update.as_ref().unwrap();
                 let slot = upd.best_layout.char_to_slot[char_id as usize];
                 let fr = freq_rank[char_id as usize] as f32;
@@ -659,11 +726,7 @@ impl App {
                 } else {
                     // 黄 → 赤
                     let s = (t - 0.5) * 2.0;
-                    egui::Color32::from_rgb(
-                        (255.0 - s * 35.0) as u8,
-                        (255.0 - s * 205.0) as u8,
-                        0,
-                    )
+                    egui::Color32::from_rgb((255.0 - s * 35.0) as u8, (255.0 - s * 205.0) as u8, 0)
                 }
             }
             ColorData::Frequency { max_freq } => {

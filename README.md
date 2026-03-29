@@ -7,6 +7,7 @@
 - コーパス（日本語テキスト）の文字・バイグラム・トライグラム頻度を集計
 - 打鍵数・スロット難易度・連続打鍵パターンを評価関数として定義
 - タブーサーチで文字の配置を最適化
+- **GUI** で最適化の進行をリアルタイムに可視化（eframe/egui）
 
 ### 配列の構造
 
@@ -19,13 +20,24 @@
 
 ## ビルド
 
-Rust 1.62以降が必要です。
+Rust 1.73以降が必要です。
 
 ```bash
 cargo build --release
 ```
 
+### プラットフォームごとの注意
+
+- **Linux**: eframe (egui) のビルドにシステムライブラリが必要です。
+  ```bash
+  sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig1-dev
+  ```
+- **Windows**: 追加依存なし。CLIの `Ctrl+C` / `SIGUSR1` シグナルハンドラは無効になります（GUI の停止ボタンで代替）。
+- **macOS**: 追加依存なし。
+
 ## 使い方
+
+### CLI モード
 
 ```bash
 # ビルド後、直接起動（ログは log/ に自動出力される）
@@ -40,6 +52,24 @@ cargo build --release
 # ログファイルのパスを指定
 ./target/release/tsuki_optimize --log result.log
 ```
+
+### GUI モード
+
+```bash
+./target/release/gui
+```
+
+GUI では以下の機能が利用できます:
+
+- **開始/停止ボタン**: 探索の開始・中断
+- **パラメータ入力**: seed、イテレーション数、リスタート閾値、コーパスパス、キーボードサイズ
+- **キーボード表示**: Layer 1 / Layer 2 の配列をリアルタイム更新
+- **色分けモード** (3種類):
+  - フィットネスマップ: 文字の頻度ランクとスロット難易度ランクのズレを可視化（緑=良い配置、赤=悪い配置）
+  - 頻度ヒートマップ: 各キーのコーパス出現頻度（寒色=低頻度、暖色=高頻度）
+  - 指負荷バランス: 8本の指の負荷を棒グラフで表示
+- **スコア推移グラフ**: 現在スコアと最良スコアをリアルタイムプロット。リスタート地点にマーカー表示
+- **スコア内訳パネル**: 打鍵数コスト、難易度コスト、バイグラムコスト、準交互ボーナスの詳細表示
 
 ### CLIオプション一覧
 
@@ -57,7 +87,7 @@ cargo build --release
 | `--keyboard-size` | `3x10` / `3x11` | `3x10` | `run.keyboard_size` | キーボードサイズ |
 | `--log` | `<path>` | `log/YYMMDD_HHMMSS.log` | — | ログファイルのパス |
 
-### 実行中の操作
+### 実行中の操作（CLI、Unix のみ）
 
 | 操作 | 効果 |
 |------|------|
@@ -70,6 +100,8 @@ cargo build --release
 
 設定の優先順位（高→低）：CLIオプション → TOMLファイル → デフォルト値
 
+GUI モードでは `tsuki_optimize.toml` が存在すれば自動的に読み込まれます。
+
 ## 評価関数
 
 スコアが小さいほど良い配列です。
@@ -81,7 +113,7 @@ cargo build --release
 
 ## コーパスについて
 
-ひらがな（濁音含む）が含まれていれば漢字混じりのテキストでもそのまま使えます。  
+ひらがな（濁音含む）が含まれていれば漢字混じりのテキストでもそのまま使えます。
 漢字、英数字、配列に含まない記号はバイグラムトライグラムの区切りとして扱われるため、「「愛してる」と言った」は「してる」「と」「った」というn-gramとして認識されます。「てると」「とった」というトライグラムとしては認識されません。
 
 ## ファイル構成
@@ -89,13 +121,21 @@ cargo build --release
 ```
 tsuki_optimize/
 ├── Cargo.toml
-├── tsuki_optimize.toml   # 設定ファイル
+├── tsuki_optimize.toml        # 設定ファイル
+├── .github/workflows/ci.yml   # CI: ビルド・テスト・clippy・成果物アップロード
 └── src/
-    ├── main.rs           # エントリポイント・CLIパース・シグナルハンドラ
-    ├── chars.rs          # 文字定義・有声音デコンポーズ
-    ├── layout.rs         # スロット・キーストローク・スワップ操作
-    ├── corpus.rs         # コーパス読み込み・n-gram統計
-    ├── cost.rs           # 評価関数・差分評価
-    ├── search.rs         # タブーサーチ本体・可動テニュア
-    └── config.rs         # TOML設定の読み込み
+    ├── lib.rs                 # ライブラリルート（各モジュールを pub mod で公開）
+    ├── main.rs                # CLI エントリポイント・CLIパース・シグナルハンドラ
+    ├── bin/
+    │   └── gui.rs             # GUI エントリポイント（eframe/egui）
+    ├── chars.rs               # 文字定義・有声音デコンポーズ
+    ├── layout.rs              # スロット・キーストローク・スワップ操作
+    ├── corpus.rs              # コーパス読み込み・n-gram統計
+    ├── cost.rs                # 評価関数・差分評価・スコア内訳
+    ├── search.rs              # タブーサーチ本体・可動テニュア
+    └── config.rs              # TOML設定の読み込み
 ```
+
+## CI
+
+GitHub Actions で Linux / Windows / macOS の3プラットフォームビルドを実行します。ビルド成果物（バイナリ + 設定ファイル + README）は Actions の Summary ページからダウンロードできます。

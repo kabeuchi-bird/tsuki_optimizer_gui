@@ -27,29 +27,29 @@ pub const MAX_CHARS: usize = 64;
 ///   Row 2: ぅ へ せ ゅ ゃ む ろ ね ー ぉ
 pub const CHAR_LIST: [char; MAX_CHARS] = [
     // Layer 1
-    'そ','こ','し','て','ょ','つ','ん','い','の','り',  //  0- 9  row0
-    'は','か','、','と','た','く','う','。','゛','き',  // 10-19  row1
-    'す','け','に','な','さ','っ','る','ち','れ','゜',  // 20-29  row2
+    'そ', 'こ', 'し', 'て', 'ょ', 'つ', 'ん', 'い', 'の', 'り', //  0- 9  row0
+    'は', 'か', '、', 'と', 'た', 'く', 'う', '。', '゛', 'き', // 10-19  row1
+    'す', 'け', 'に', 'な', 'さ', 'っ', 'る', 'ち', 'れ', '゜', // 20-29  row2
     // Layer 2
-    'ぁ','ひ','ほ','ふ','め','ぬ','え','み','や','ぇ',  // 30-39  row0
-    'ぃ','を','ら','あ','よ','ま','お','も','わ','ゆ',  // 40-49  row1
-    'ぅ','へ','せ','ゅ','ゃ','む','ろ','ね','ー','ぉ',  // 50-59  row2
+    'ぁ', 'ひ', 'ほ', 'ふ', 'め', 'ぬ', 'え', 'み', 'や', 'ぇ', // 30-39  row0
+    'ぃ', 'を', 'ら', 'あ', 'よ', 'ま', 'お', 'も', 'わ', 'ゆ', // 40-49  row1
+    'ぅ', 'へ', 'せ', 'ゅ', 'ゃ', 'む', 'ろ', 'ね', 'ー', 'ぉ', // 50-59  row2
     // 3x11 追加
-    '「','」',                                           // 60-61  カギ括弧
-    '□','□',                                           // 62-63  void（空きスロット代替）
+    '「', '」', // 60-61  カギ括弧
+    '□', '□', // 62-63  void（空きスロット代替）
 ];
 
 /// 読点「、」のCharId（3x10ではDスロット固定）
-pub const TOUTEN_ID:      CharId = 12;
+pub const TOUTEN_ID: CharId = 12;
 /// 句点「。」のCharId（3x10ではKスロット固定）
-pub const KUTEN_ID:       CharId = 17;
+pub const KUTEN_ID: CharId = 17;
 /// 濁点「゛」のCharId（L1固定・L1内移動可）
-pub const DAKUTEN_ID:     CharId = 18;
+pub const DAKUTEN_ID: CharId = 18;
 /// 半濁点「゜」のCharId（L1固定・L1内移動可）
-pub const HANDAKUTEN_ID:  CharId = 29;
+pub const HANDAKUTEN_ID: CharId = 29;
 /// 開きカギ括弧「「」のCharId（3x11のみ）
 #[allow(dead_code)]
-pub const KAGIKAKO_OPEN_ID:  CharId = 60;
+pub const KAGIKAKO_OPEN_ID: CharId = 60;
 /// 閉じカギ括弧「」」のCharId（3x11のみ）
 #[allow(dead_code)]
 pub const KAGIKAKO_CLOSE_ID: CharId = 61;
@@ -59,8 +59,10 @@ pub const VOID_CHAR_FIRST: CharId = 62;
 /// char → CharId のルックアップテーブルを構築
 /// void文字（'□'、インデックス62-63）はマップに含めない
 pub fn build_char_to_id() -> HashMap<char, CharId> {
-    CHAR_LIST.iter().enumerate()
-        .take(62)  // 実文字のみ（void除外）
+    CHAR_LIST
+        .iter()
+        .enumerate()
+        .take(62) // 実文字のみ（void除外）
         .map(|(i, &c)| (c, i as CharId))
         .collect()
 }
@@ -74,14 +76,34 @@ pub fn decompose(c: char, map: &HashMap<char, CharId>) -> ArrayVec2 {
     }
     // 有声・半濁音テーブル
     static VOICED: &[(char, char, char)] = &[
-        ('が','か','゛'),('ぎ','き','゛'),('ぐ','く','゛'),('げ','け','゛'),('ご','こ','゛'),
-        ('ざ','さ','゛'),('じ','し','゛'),('ず','す','゛'),('ぜ','せ','゛'),('ぞ','そ','゛'),
-        ('だ','た','゛'),('ぢ','ち','゛'),('づ','つ','゛'),('で','て','゛'),('ど','と','゛'),
-        ('ば','は','゛'),('び','ひ','゛'),('ぶ','ふ','゛'),('べ','へ','゛'),('ぼ','ほ','゛'),
-        ('ぱ','は','゜'),('ぴ','ひ','゜'),('ぷ','ふ','゜'),('ぺ','へ','゜'),('ぽ','ほ','゜'),
-        ('ゔ','う','゛'),
+        ('が', 'か', '゛'),
+        ('ぎ', 'き', '゛'),
+        ('ぐ', 'く', '゛'),
+        ('げ', 'け', '゛'),
+        ('ご', 'こ', '゛'),
+        ('ざ', 'さ', '゛'),
+        ('じ', 'し', '゛'),
+        ('ず', 'す', '゛'),
+        ('ぜ', 'せ', '゛'),
+        ('ぞ', 'そ', '゛'),
+        ('だ', 'た', '゛'),
+        ('ぢ', 'ち', '゛'),
+        ('づ', 'つ', '゛'),
+        ('で', 'て', '゛'),
+        ('ど', 'と', '゛'),
+        ('ば', 'は', '゛'),
+        ('び', 'ひ', '゛'),
+        ('ぶ', 'ふ', '゛'),
+        ('べ', 'へ', '゛'),
+        ('ぼ', 'ほ', '゛'),
+        ('ぱ', 'は', '゜'),
+        ('ぴ', 'ひ', '゜'),
+        ('ぷ', 'ふ', '゜'),
+        ('ぺ', 'へ', '゜'),
+        ('ぽ', 'ほ', '゜'),
+        ('ゔ', 'う', '゛'),
     ];
-    if let Some(&(_, base, diac)) = VOICED.iter().find(|&&(v,_,_)| v == c) {
+    if let Some(&(_, base, diac)) = VOICED.iter().find(|&&(v, _, _)| v == c) {
         if let (Some(&bid), Some(&did)) = (map.get(&base), map.get(&diac)) {
             return ArrayVec2::two(bid, did);
         }
@@ -97,8 +119,25 @@ pub struct ArrayVec2 {
 }
 
 impl ArrayVec2 {
-    pub fn empty() -> Self { Self { data: [0; 2], len: 0 } }
-    pub fn one(a: CharId) -> Self { Self { data: [a, 0], len: 1 } }
-    pub fn two(a: CharId, b: CharId) -> Self { Self { data: [a, b], len: 2 } }
-    pub fn as_slice(&self) -> &[CharId] { &self.data[..self.len as usize] }
+    pub fn empty() -> Self {
+        Self {
+            data: [0; 2],
+            len: 0,
+        }
+    }
+    pub fn one(a: CharId) -> Self {
+        Self {
+            data: [a, 0],
+            len: 1,
+        }
+    }
+    pub fn two(a: CharId, b: CharId) -> Self {
+        Self {
+            data: [a, b],
+            len: 2,
+        }
+    }
+    pub fn as_slice(&self) -> &[CharId] {
+        &self.data[..self.len as usize]
+    }
 }

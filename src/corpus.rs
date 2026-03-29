@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::chars::{CharId, MAX_CHARS, build_char_to_id, decompose};
+use crate::chars::{build_char_to_id, decompose, CharId, MAX_CHARS};
 
 /// ——————————————————————————————
 /// コーパス統計
@@ -64,7 +64,9 @@ impl Corpus {
         let mut skipped_chars = 0u64;
 
         for c in text.chars() {
-            if c == '\n' || c == '\r' { continue; }
+            if c == '\n' || c == '\r' {
+                continue;
+            }
 
             let ids = decompose(c, &map);
             if ids.as_slice().is_empty() {
@@ -81,7 +83,7 @@ impl Corpus {
         }
 
         let mut uni_count = [0u64; MAX_CHARS];
-        let mut bi_count:  HashMap<(CharId, CharId), u64>         = HashMap::new();
+        let mut bi_count: HashMap<(CharId, CharId), u64> = HashMap::new();
         let mut tri_count: HashMap<(CharId, CharId, CharId), u64> = HashMap::new();
         let mut total_chars = 0u64;
 
@@ -96,7 +98,9 @@ impl Corpus {
                 *bi_count.entry((seg[i], seg[i + 1])).or_insert(0) += 1;
             }
             for i in 0..n.saturating_sub(2) {
-                *tri_count.entry((seg[i], seg[i + 1], seg[i + 2])).or_insert(0) += 1;
+                *tri_count
+                    .entry((seg[i], seg[i + 1], seg[i + 2]))
+                    .or_insert(0) += 1;
             }
         }
 
@@ -111,15 +115,26 @@ impl Corpus {
             unigrams[i] = c as f64 / total;
         }
 
-        let bigrams: Vec<BigramEntry> = bi_count.iter()
-            .map(|(&(c1, c2), &cnt)| BigramEntry { c1, c2, freq: cnt as f64 / total })
+        let bigrams: Vec<BigramEntry> = bi_count
+            .iter()
+            .map(|(&(c1, c2), &cnt)| BigramEntry {
+                c1,
+                c2,
+                freq: cnt as f64 / total,
+            })
             .collect();
 
-        let trigrams: Vec<TrigramEntry> = tri_count.iter()
-            .map(|(&(c1, c2, c3), &cnt)| TrigramEntry { c1, c2, c3, freq: cnt as f64 / total })
+        let trigrams: Vec<TrigramEntry> = tri_count
+            .iter()
+            .map(|(&(c1, c2, c3), &cnt)| TrigramEntry {
+                c1,
+                c2,
+                c3,
+                freq: cnt as f64 / total,
+            })
             .collect();
 
-        let bigram_adj  = Self::build_bigram_adj(&bigrams);
+        let bigram_adj = Self::build_bigram_adj(&bigrams);
         let trigram_adj = Self::build_trigram_adj(&trigrams);
 
         eprintln!(
@@ -133,15 +148,21 @@ impl Corpus {
             trigrams.len(),
         );
 
-        Corpus { unigrams, bigrams, trigrams, bigram_adj, trigram_adj }
+        Corpus {
+            unigrams,
+            bigrams,
+            trigrams,
+            bigram_adj,
+            trigram_adj,
+        }
     }
 
     fn empty() -> Self {
         Corpus {
-            unigrams:    [0.0; MAX_CHARS],
-            bigrams:     vec![],
-            trigrams:    vec![],
-            bigram_adj:  vec![vec![]; MAX_CHARS],
+            unigrams: [0.0; MAX_CHARS],
+            bigrams: vec![],
+            trigrams: vec![],
+            bigram_adj: vec![vec![]; MAX_CHARS],
             trigram_adj: vec![vec![]; MAX_CHARS],
         }
     }

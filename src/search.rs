@@ -1,16 +1,16 @@
 // search.rs — タブーサーチ本体
 
+use rand::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use rand::prelude::*;
 
-use crate::chars::{CharId, MAX_CHARS, DAKUTEN_ID, HANDAKUTEN_ID, VOID_CHAR_FIRST};
+use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, MAX_CHARS, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
 use crate::cost::{delta_score, score, DeltaScoreBuffer, Weights};
 use crate::layout::{
-    ExclusivePair, KeyboardParams, Layout, SHIFT_SLOT_SENTINEL,
-    is_fixed, is_inter_layer_movable, swap_would_violate,
+    is_fixed, is_inter_layer_movable, swap_would_violate, ExclusivePair, KeyboardParams, Layout,
+    SHIFT_SLOT_SENTINEL,
 };
 
 /// ——————————————————————————————
@@ -49,7 +49,11 @@ impl TabuList {
 
 #[inline]
 fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// ——————————————————————————————
@@ -137,8 +141,8 @@ impl Default for SearchConfig {
             log_interval: 1_000,
             perturbation_swaps: 8,
             tenure_grow_threshold: 0.5,
-            tenure_grow_interval:  200,
-            tenure_max_scale:      3.0,
+            tenure_grow_interval: 200,
+            tenure_max_scale: 3.0,
         }
     }
 }
@@ -164,40 +168,43 @@ pub fn run(
     let mut best_score = current_score;
 
     let mut no_improve = 0usize;
-    let mut restarts   = 0usize;
-    let mut iter       = 0usize;
+    let mut restarts = 0usize;
+    let mut iter = 0usize;
 
-    let mut cur_tabu_l1    = config.tabu_l1;
-    let mut cur_tabu_l2    = config.tabu_l2;
+    let mut cur_tabu_l1 = config.tabu_l1;
+    let mut cur_tabu_l2 = config.tabu_l2;
     let mut cur_tabu_inter = config.tabu_inter;
-    let tenure_grow_start =
-        (config.restart_after as f64 * config.tenure_grow_threshold) as usize;
-    let grow_period = config.restart_after.saturating_sub(tenure_grow_start).max(1);
-    let tenure_step_l1 = (
-        config.tabu_l1 as f64
+    let tenure_grow_start = (config.restart_after as f64 * config.tenure_grow_threshold) as usize;
+    let grow_period = config
+        .restart_after
+        .saturating_sub(tenure_grow_start)
+        .max(1);
+    let tenure_step_l1 = (config.tabu_l1 as f64
         * (config.tenure_max_scale - 1.0)
         * config.tenure_grow_interval as f64
-        / grow_period as f64
-    ).ceil().max(1.0) as usize;
-    let tenure_step_l2 = (
-        config.tabu_l2 as f64
+        / grow_period as f64)
+        .ceil()
+        .max(1.0) as usize;
+    let tenure_step_l2 = (config.tabu_l2 as f64
         * (config.tenure_max_scale - 1.0)
         * config.tenure_grow_interval as f64
-        / grow_period as f64
-    ).ceil().max(1.0) as usize;
-    let tenure_step_inter = (
-        config.tabu_inter as f64
+        / grow_period as f64)
+        .ceil()
+        .max(1.0) as usize;
+    let tenure_step_inter = (config.tabu_inter as f64
         * (config.tenure_max_scale - 1.0)
         * config.tenure_grow_interval as f64
-        / grow_period as f64
-    ).ceil().max(1.0) as usize;
+        / grow_period as f64)
+        .ceil()
+        .max(1.0) as usize;
 
-    let mut tabu_l1    = TabuList::new(cur_tabu_l1);
-    let mut tabu_l2    = TabuList::new(cur_tabu_l2);
+    let mut tabu_l1 = TabuList::new(cur_tabu_l1);
+    let mut tabu_l2 = TabuList::new(cur_tabu_l2);
     let mut tabu_inter = TabuList::new(cur_tabu_inter);
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
-    let mut candidates: Vec<Candidate> = Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
+    let mut candidates: Vec<Candidate> =
+        Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
@@ -209,37 +216,47 @@ pub fn run(
 
         collect_l1_free_chars_into(&current, &mut l1_free);
         generate_swap_candidates(
-            &current, ctx,
-            &l1_free, OpKind::SwapL1,
-            config.ab_sample_limit, rng,
+            &current,
+            ctx,
+            &l1_free,
+            OpKind::SwapL1,
+            config.ab_sample_limit,
+            rng,
             &mut candidates,
             &mut delta_buf,
         );
 
         collect_l2_chars_into(&current, &mut l2_free);
         generate_swap_candidates(
-            &current, ctx,
-            &l2_free, OpKind::SwapL2,
-            config.ab_sample_limit, rng,
+            &current,
+            ctx,
+            &l2_free,
+            OpKind::SwapL2,
+            config.ab_sample_limit,
+            rng,
             &mut candidates,
             &mut delta_buf,
         );
 
         generate_inter_layer_candidates(
-            &current, ctx,
-            config.inter_sample, rng,
+            &current,
+            ctx,
+            config.inter_sample,
+            rng,
             &mut candidates,
             &mut delta_buf,
         );
 
-        if candidates.is_empty() { break; }
+        if candidates.is_empty() {
+            break;
+        }
 
         candidates.sort_unstable_by(|a, b| a.delta.total_cmp(&b.delta));
 
         let chosen = candidates.iter().find(|cand| {
             let tabu = match cand.kind {
-                OpKind::SwapL1    => tabu_l1.contains(cand.c1, cand.c2),
-                OpKind::SwapL2    => tabu_l2.contains(cand.c1, cand.c2),
+                OpKind::SwapL1 => tabu_l1.contains(cand.c1, cand.c2),
+                OpKind::SwapL2 => tabu_l2.contains(cand.c1, cand.c2),
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
             };
             !tabu || (current_score + cand.delta < best_score)
@@ -252,17 +269,20 @@ pub fn run(
         current_score += chosen.delta;
 
         match chosen.kind {
-            OpKind::SwapL1     => tabu_l1.add(chosen.c1, chosen.c2),
-            OpKind::SwapL2     => tabu_l2.add(chosen.c1, chosen.c2),
+            OpKind::SwapL1 => tabu_l1.add(chosen.c1, chosen.c2),
+            OpKind::SwapL2 => tabu_l2.add(chosen.c1, chosen.c2),
             OpKind::InterLayer => tabu_inter.add(chosen.c1, chosen.c2),
         }
 
         if current_score < best_score {
-            best_score  = current_score;
-            best        = current.clone();
-            no_improve  = 0;
+            best_score = current_score;
+            best = current.clone();
+            no_improve = 0;
             on_update(&SearchUpdate {
-                iter, restarts, current_score, best_score,
+                iter,
+                restarts,
+                current_score,
+                best_score,
                 best_layout: best.clone(),
                 unigrams: ctx.corpus.unigrams,
                 phase: SearchPhase::Running,
@@ -271,11 +291,11 @@ pub fn run(
                 || cur_tabu_l2 != config.tabu_l2
                 || cur_tabu_inter != config.tabu_inter
             {
-                cur_tabu_l1    = config.tabu_l1;
-                cur_tabu_l2    = config.tabu_l2;
+                cur_tabu_l1 = config.tabu_l1;
+                cur_tabu_l2 = config.tabu_l2;
                 cur_tabu_inter = config.tabu_inter;
-                tabu_l1    = TabuList::new(cur_tabu_l1);
-                tabu_l2    = TabuList::new(cur_tabu_l2);
+                tabu_l1 = TabuList::new(cur_tabu_l1);
+                tabu_l2 = TabuList::new(cur_tabu_l2);
                 tabu_inter = TabuList::new(cur_tabu_inter);
             }
         } else {
@@ -283,19 +303,17 @@ pub fn run(
             if no_improve > tenure_grow_start
                 && (no_improve - tenure_grow_start).is_multiple_of(config.tenure_grow_interval)
             {
-                let max_l1    = (config.tabu_l1    as f64 * config.tenure_max_scale) as usize;
-                let max_l2    = (config.tabu_l2    as f64 * config.tenure_max_scale) as usize;
+                let max_l1 = (config.tabu_l1 as f64 * config.tenure_max_scale) as usize;
+                let max_l2 = (config.tabu_l2 as f64 * config.tenure_max_scale) as usize;
                 let max_inter = (config.tabu_inter as f64 * config.tenure_max_scale) as usize;
                 let grew =
-                       cur_tabu_l1    < max_l1
-                    || cur_tabu_l2    < max_l2
-                    || cur_tabu_inter < max_inter;
-                cur_tabu_l1    = (cur_tabu_l1    + tenure_step_l1).min(max_l1);
-                cur_tabu_l2    = (cur_tabu_l2    + tenure_step_l2).min(max_l2);
+                    cur_tabu_l1 < max_l1 || cur_tabu_l2 < max_l2 || cur_tabu_inter < max_inter;
+                cur_tabu_l1 = (cur_tabu_l1 + tenure_step_l1).min(max_l1);
+                cur_tabu_l2 = (cur_tabu_l2 + tenure_step_l2).min(max_l2);
                 cur_tabu_inter = (cur_tabu_inter + tenure_step_inter).min(max_inter);
                 if grew {
-                    tabu_l1    = TabuList::new(cur_tabu_l1);
-                    tabu_l2    = TabuList::new(cur_tabu_l2);
+                    tabu_l1 = TabuList::new(cur_tabu_l1);
+                    tabu_l2 = TabuList::new(cur_tabu_l2);
                     tabu_inter = TabuList::new(cur_tabu_inter);
                 }
             }
@@ -309,7 +327,10 @@ pub fn run(
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
             on_update(&SearchUpdate {
-                iter, restarts, current_score, best_score,
+                iter,
+                restarts,
+                current_score,
+                best_score,
                 best_layout: best.clone(),
                 unigrams: ctx.corpus.unigrams,
                 phase: SearchPhase::Running,
@@ -321,23 +342,30 @@ pub fn run(
                 let _ = writeln!(out, "最大再起動回数到達。探索終了。");
                 break;
             }
-            restarts  += 1;
+            restarts += 1;
             no_improve = 0;
 
             current = best.clone();
             random_perturbation(&mut current, config.perturbation_swaps, rng, ctx.pairs);
             current_score = score(&current, ctx.corpus, ctx.weights);
 
-            cur_tabu_l1    = config.tabu_l1;
-            cur_tabu_l2    = config.tabu_l2;
+            cur_tabu_l1 = config.tabu_l1;
+            cur_tabu_l2 = config.tabu_l2;
             cur_tabu_inter = config.tabu_inter;
-            tabu_l1    = TabuList::new(cur_tabu_l1);
-            tabu_l2    = TabuList::new(cur_tabu_l2);
+            tabu_l1 = TabuList::new(cur_tabu_l1);
+            tabu_l2 = TabuList::new(cur_tabu_l2);
             tabu_inter = TabuList::new(cur_tabu_inter);
 
-            let _ = writeln!(out, "  → 再起動 #{}: 摂動後スコア={:.4}", restarts, current_score);
+            let _ = writeln!(
+                out,
+                "  → 再起動 #{}: 摂動後スコア={:.4}",
+                restarts, current_score
+            );
             on_update(&SearchUpdate {
-                iter, restarts, current_score, best_score,
+                iter,
+                restarts,
+                current_score,
+                best_score,
                 best_layout: best.clone(),
                 unigrams: ctx.corpus.unigrams,
                 phase: SearchPhase::Restarting,
@@ -345,7 +373,11 @@ pub fn run(
         }
 
         if report_flag.swap(false, Ordering::Relaxed) {
-            let _ = writeln!(out, "\n[SIGUSR1] 現在のベスト配列 (スコア={:.4}, iter {})", best_score, iter);
+            let _ = writeln!(
+                out,
+                "\n[SIGUSR1] 現在のベスト配列 (スコア={:.4}, iter {})",
+                best_score, iter
+            );
             best.display(out);
         }
         if stop_flag.load(Ordering::Relaxed) {
@@ -354,12 +386,16 @@ pub fn run(
         }
     }
 
-    let _ = writeln!(out,
+    let _ = writeln!(
+        out,
         "探索完了: {} iter, {} restarts | 最良スコア={:.4}",
         iter, restarts, best_score
     );
     on_update(&SearchUpdate {
-        iter, restarts, current_score, best_score,
+        iter,
+        restarts,
+        current_score,
+        best_score,
         best_layout: best.clone(),
         unigrams: ctx.corpus.unigrams,
         phase: SearchPhase::Finished,
@@ -412,16 +448,25 @@ fn generate_swap_candidates(
     buf: &mut DeltaScoreBuffer,
 ) {
     let n = chars.len();
-    if n < 2 { return; }
+    if n < 2 {
+        return;
+    }
 
     let max_pairs = n * (n - 1) / 2;
     if max_pairs <= sample_limit {
         for i in 0..n {
             for j in i + 1..n {
                 let (c1, c2) = (chars[i], chars[j]);
-                if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
+                if swap_would_violate(layout, c1, c2, ctx.pairs) {
+                    continue;
+                }
                 let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
-                out.push(Candidate { kind, c1, c2, delta });
+                out.push(Candidate {
+                    kind,
+                    c1,
+                    c2,
+                    delta,
+                });
             }
         }
     } else {
@@ -431,11 +476,20 @@ fn generate_swap_candidates(
             tries += 1;
             let i = rng.gen_range(0..n);
             let j = rng.gen_range(0..n);
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let (c1, c2) = (chars[i], chars[j]);
-            if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
+            if swap_would_violate(layout, c1, c2, ctx.pairs) {
+                continue;
+            }
             let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
-            out.push(Candidate { kind, c1, c2, delta });
+            out.push(Candidate {
+                kind,
+                c1,
+                c2,
+                delta,
+            });
             sampled += 1;
         }
     }
@@ -464,7 +518,9 @@ fn generate_inter_layer_candidates(
         .collect();
     l2_chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    if l1_chars.is_empty() || l2_chars.is_empty() { return; }
+    if l1_chars.is_empty() || l2_chars.is_empty() {
+        return;
+    }
 
     let l1_weights: Vec<f64> = (0..l1_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
     let l2_weights: Vec<f64> = (0..l2_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
@@ -477,9 +533,16 @@ fn generate_inter_layer_candidates(
         tries += 1;
         let c1 = weighted_choice(&l1_chars, &l1_weights, l1_w_sum, rng).0;
         let c2 = weighted_choice(&l2_chars, &l2_weights, l2_w_sum, rng).0;
-        if swap_would_violate(layout, c1, c2, ctx.pairs) { continue; }
+        if swap_would_violate(layout, c1, c2, ctx.pairs) {
+            continue;
+        }
         let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
-        out.push(Candidate { kind: OpKind::InterLayer, c1, c2, delta });
+        out.push(Candidate {
+            kind: OpKind::InterLayer,
+            c1,
+            c2,
+            delta,
+        });
         sampled += 1;
     }
 }
@@ -493,7 +556,9 @@ fn weighted_choice<T: Copy>(
     let mut r = rng.gen::<f64>() * w_sum;
     for (i, &w) in weights.iter().enumerate() {
         r -= w;
-        if r <= 0.0 { return items[i]; }
+        if r <= 0.0 {
+            return items[i];
+        }
     }
     *items.last().unwrap()
 }
@@ -513,12 +578,16 @@ fn random_perturbation(
         .filter(|&c| !layout.is_l1(c) && !is_void(c))
         .collect();
 
-    if l1_chars.is_empty() || l2_chars.is_empty() { return; }
+    if l1_chars.is_empty() || l2_chars.is_empty() {
+        return;
+    }
 
     for _ in 0..n_swaps {
         let c1 = *l1_chars.choose(rng).unwrap();
         let c2 = *l2_chars.choose(rng).unwrap();
-        if swap_would_violate(layout, c1, c2, pairs) { continue; }
+        if swap_would_violate(layout, c1, c2, pairs) {
+            continue;
+        }
         layout.swap_chars(c1, c2);
     }
 }
@@ -526,7 +595,11 @@ fn random_perturbation(
 /// ——————————————————————————————
 /// 初期解生成：頻度上位の文字をLayer 1へ配置
 /// ——————————————————————————————
-pub fn build_initial_layout(ctx: &SearchContext, kp: KeyboardParams, out: &mut impl Write) -> Layout {
+pub fn build_initial_layout(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    out: &mut impl Write,
+) -> Layout {
     let mut layout = Layout::initial(kp);
 
     // L1に確定固定される文字：
@@ -542,27 +615,28 @@ pub fn build_initial_layout(ctx: &SearchContext, kp: KeyboardParams, out: &mut i
     //   3x11: 31 - 2（l1_only）= 29
 
     let l1_char_slots = kp.num_slots_per_layer as usize
-        - if kp.size == crate::layout::KeyboardSize::K3x11 { 2 } else { 0 };
+        - if kp.size == crate::layout::KeyboardSize::K3x11 {
+            2
+        } else {
+            0
+        };
 
     let l1_fixed_count = match kp.size {
-        crate::layout::KeyboardSize::K3x10 => 4,  // 。、゛゜
-        crate::layout::KeyboardSize::K3x11 => 2,  // ゛゜のみ（。、は自由）
+        crate::layout::KeyboardSize::K3x10 => 4, // 。、゛゜
+        crate::layout::KeyboardSize::K3x11 => 2, // ゛゜のみ（。、は自由）
     };
     let l1_free_slots = l1_char_slots - l1_fixed_count;
 
     // 動かせる全文字を頻度降順にソート
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| {
-            !is_fixed(c, kp)
-                && !is_l1_only_char(c)
-                && !is_void(c)
-        })
+        .filter(|&c| !is_fixed(c, kp) && !is_l1_only_char(c) && !is_void(c))
         .map(|c| (c, ctx.corpus.unigrams[c as usize]))
         .collect();
     movable.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
     // 頻度上位 l1_free_slots 文字をL1ターゲットとする
-    let l1_targets: Vec<CharId> = movable.iter()
+    let l1_targets: Vec<CharId> = movable
+        .iter()
         .take(l1_free_slots)
         .map(|&(c, _)| c)
         .collect();
@@ -581,7 +655,8 @@ pub fn build_initial_layout(ctx: &SearchContext, kp: KeyboardParams, out: &mut i
         .collect();
 
     // L2にいてL1に昇格すべき文字のキュー
-    let mut to_promote: std::collections::VecDeque<CharId> = l1_targets.iter()
+    let mut to_promote: std::collections::VecDeque<CharId> = l1_targets
+        .iter()
         .copied()
         .filter(|&c| !layout.is_l1(c))
         .collect();
@@ -601,29 +676,47 @@ pub fn build_initial_layout(ctx: &SearchContext, kp: KeyboardParams, out: &mut i
                 let l1_c = layout.slot_to_char[l1_slot];
                 let l2_c = layout.slot_to_char[l2_slot];
                 // SHIFT_SLOT_SENTINEL(255) と void(>=62) を除外
-                if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST { continue; }
-                if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) { continue; }
+                if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
+                    continue;
+                }
+                if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
+                    continue;
+                }
 
                 any_violation = true;
                 let mut fixed = false;
                 'fix: for alt_l1_slot in 0..npl {
                     let alt_l2_slot = alt_l1_slot + npl;
                     let alt_l2_c = layout.slot_to_char[alt_l2_slot];
-                    if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c { continue; }
+                    if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
+                        continue;
+                    }
                     // スワップ後: l1_slot側は (l1_c, alt_l2_c)、alt_l1_slot側は (alt_l1_c, l2_c)
-                    if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) { continue; }
+                    if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
+                        continue;
+                    }
                     let alt_l1_c = layout.slot_to_char[alt_l1_slot];
-                    if alt_l1_c != SHIFT_SLOT_SENTINEL && alt_l1_c < VOID_CHAR_FIRST
-                        && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c)) { continue; }
+                    if alt_l1_c != SHIFT_SLOT_SENTINEL
+                        && alt_l1_c < VOID_CHAR_FIRST
+                        && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
+                    {
+                        continue;
+                    }
                     layout.swap_chars(l2_c, alt_l2_c);
                     fixed = true;
                     break 'fix;
                 }
                 if !fixed {
-                    let _ = writeln!(out, "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})", l1_slot);
+                    let _ = writeln!(
+                        out,
+                        "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})",
+                        l1_slot
+                    );
                 }
             }
-            if !any_violation { break; }
+            if !any_violation {
+                break;
+            }
         }
     }
 
@@ -643,4 +736,3 @@ pub fn build_initial_layout(ctx: &SearchContext, kp: KeyboardParams, out: &mut i
 fn is_l1_only_char(c: CharId) -> bool {
     c == DAKUTEN_ID || c == HANDAKUTEN_ID
 }
-

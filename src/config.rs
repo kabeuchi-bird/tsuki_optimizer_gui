@@ -1,8 +1,8 @@
 // config.rs — TOMLベース設定ファイルの読み込みと構造体への変換
 
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
-use serde::Deserialize;
 
 use crate::chars::{self, MAX_CHARS};
 use crate::cost::Weights;
@@ -90,8 +90,7 @@ impl Config {
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("設定ファイル読み込みエラー: {}", e))?;
-        toml::from_str(&text)
-            .map_err(|e| format!("設定ファイルのパースエラー: {}", e))
+        toml::from_str(&text).map_err(|e| format!("設定ファイルのパースエラー: {}", e))
     }
 
     /// keyboard_size 設定から KeyboardParams を生成する
@@ -111,19 +110,19 @@ impl Config {
         let r = &self.run;
         let d = SearchConfig::default();
         SearchConfig {
-            max_iter:              r.max_iter.unwrap_or(d.max_iter),
-            restart_after:         r.restart_after.unwrap_or(d.restart_after),
-            max_restarts:          r.max_restarts.unwrap_or(d.max_restarts),
-            tabu_l1:               r.tabu_l1.unwrap_or(d.tabu_l1),
-            tabu_l2:               r.tabu_l2.unwrap_or(d.tabu_l2),
-            tabu_inter:            r.tabu_inter.unwrap_or(d.tabu_inter),
-            inter_sample:          r.inter_sample.unwrap_or(d.inter_sample),
-            ab_sample_limit:       r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
-            log_interval:          r.log_interval.unwrap_or(d.log_interval),
-            perturbation_swaps:    r.perturbation_swaps.unwrap_or(d.perturbation_swaps),
+            max_iter: r.max_iter.unwrap_or(d.max_iter),
+            restart_after: r.restart_after.unwrap_or(d.restart_after),
+            max_restarts: r.max_restarts.unwrap_or(d.max_restarts),
+            tabu_l1: r.tabu_l1.unwrap_or(d.tabu_l1),
+            tabu_l2: r.tabu_l2.unwrap_or(d.tabu_l2),
+            tabu_inter: r.tabu_inter.unwrap_or(d.tabu_inter),
+            inter_sample: r.inter_sample.unwrap_or(d.inter_sample),
+            ab_sample_limit: r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
+            log_interval: r.log_interval.unwrap_or(d.log_interval),
+            perturbation_swaps: r.perturbation_swaps.unwrap_or(d.perturbation_swaps),
             tenure_grow_threshold: r.tenure_grow_threshold.unwrap_or(d.tenure_grow_threshold),
-            tenure_grow_interval:  r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
-            tenure_max_scale:      r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
+            tenure_grow_interval: r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
+            tenure_max_scale: r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
         }
     }
 
@@ -136,15 +135,15 @@ impl Config {
 
         Weights {
             kp,
-            stroke_scale:        w.stroke_scale.unwrap_or(d.stroke_scale),
+            stroke_scale: w.stroke_scale.unwrap_or(d.stroke_scale),
             same_finger_penalty: w.same_finger_penalty.unwrap_or(d.same_finger_penalty),
-            same_key_penalty:    w.same_key_penalty.unwrap_or(d.same_key_penalty),
-            upper_lower_jump:    w.upper_lower_jump.unwrap_or(d.upper_lower_jump),
-            same_hand_base:      w.same_hand_base.unwrap_or(d.same_hand_base),
-            alternation_bonus:   w.alternation_bonus.unwrap_or(d.alternation_bonus),
-            outroll_bonus:       w.outroll_bonus.unwrap_or(d.outroll_bonus),
-            inroll_bonus:        w.inroll_bonus.unwrap_or(d.inroll_bonus),
-            quasi_alt_bonus:     w.quasi_alt_bonus.unwrap_or(d.quasi_alt_bonus),
+            same_key_penalty: w.same_key_penalty.unwrap_or(d.same_key_penalty),
+            upper_lower_jump: w.upper_lower_jump.unwrap_or(d.upper_lower_jump),
+            same_hand_base: w.same_hand_base.unwrap_or(d.same_hand_base),
+            alternation_bonus: w.alternation_bonus.unwrap_or(d.alternation_bonus),
+            outroll_bonus: w.outroll_bonus.unwrap_or(d.outroll_bonus),
+            inroll_bonus: w.inroll_bonus.unwrap_or(d.inroll_bonus),
+            quasi_alt_bonus: w.quasi_alt_bonus.unwrap_or(d.quasi_alt_bonus),
             slot_difficulty: [
                 parse_difficulty_row(s.row0.as_deref(), d.slot_difficulty[0]),
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),
@@ -188,7 +187,7 @@ pub struct ExclusivePairConfig {
 }
 
 // 濁音になりうる音すべて ＋ 濁点
-const DAKUON_BASE: &str  = "うかきくけこさしすせそたちつてとはひふへほ゛";
+const DAKUON_BASE: &str = "うかきくけこさしすせそたちつてとはひふへほ゛";
 // イ段のみ（きしちひ）
 const DAKUON_I_ROW: &str = "きしちひ";
 
@@ -200,7 +199,8 @@ impl Config {
 
         // プリセット展開
         if let Some(preset) = &self.constraints.preset {
-            let daku_set: HashSet<_> = DAKUON_BASE.chars()
+            let daku_set: HashSet<_> = DAKUON_BASE
+                .chars()
                 .filter_map(|c| char_map.get(&c).copied())
                 .collect();
             match preset.as_str() {
@@ -209,11 +209,15 @@ impl Config {
                     group_b: daku_set,
                 }),
                 "i-daku" => {
-                    let i_row: HashSet<_> = DAKUON_I_ROW.chars()
+                    let i_row: HashSet<_> = DAKUON_I_ROW
+                        .chars()
                         .filter_map(|c| char_map.get(&c).copied())
                         .collect();
-                    result.push(ExclusivePair { group_a: i_row, group_b: daku_set });
-                },
+                    result.push(ExclusivePair {
+                        group_a: i_row,
+                        group_b: daku_set,
+                    });
+                }
                 other => eprintln!("警告: 不明なプリセット '{}' → 無視します", other),
             }
         }
@@ -221,10 +225,14 @@ impl Config {
         // 明示的ペア（プリセットと併用可）
         for p in &self.constraints.exclusive_pairs {
             result.push(ExclusivePair {
-                group_a: p.group_a.chars()
+                group_a: p
+                    .group_a
+                    .chars()
                     .filter_map(|c| char_map.get(&c).copied())
                     .collect(),
-                group_b: p.group_b.chars()
+                group_b: p
+                    .group_b
+                    .chars()
                     .filter_map(|c| char_map.get(&c).copied())
                     .collect(),
             });
@@ -240,8 +248,8 @@ impl Config {
         // ゛は常にL1固定なのでトリガー対象から外す
         let target_str = match self.constraints.preset.as_deref() {
             Some("all-daku") => "うかきくけこさしすせそたちつてとはひふへほ",
-            Some("i-daku")   => "きしちひ",
-            _                => return trigger,
+            Some("i-daku") => "きしちひ",
+            _ => return trigger,
         };
         let char_map = chars::build_char_to_id();
         for c in target_str.chars() {
@@ -256,9 +264,14 @@ impl Config {
 /// Vec<f64> から [f64; 11] に変換する。
 /// 要素数が 11 未満の場合はデフォルト値で補完し、超える場合は切り捨てて警告を出す。
 fn parse_difficulty_row(src: Option<&[f64]>, default: [f64; 11]) -> [f64; 11] {
-    let Some(v) = src else { return default; };
+    let Some(v) = src else {
+        return default;
+    };
     if v.len() > 11 {
-        eprintln!("警告: slot_difficulty の行の要素数が 11 を超えています（{}要素）→ 先頭11個を使用", v.len());
+        eprintln!(
+            "警告: slot_difficulty の行の要素数が 11 を超えています（{}要素）→ 先頭11個を使用",
+            v.len()
+        );
     }
     let mut arr = default;
     for (i, &val) in v.iter().enumerate().take(11) {
