@@ -118,12 +118,28 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        // config.toml があれば読み込み、GUI の初期値に反映する
+        let config_path = Path::new("config.toml");
+        let toml_config = if config_path.exists() {
+            Config::from_file(config_path).unwrap_or_default()
+        } else {
+            Config::default()
+        };
+        let search_config = toml_config.build_search_config();
+        let corpus_path = toml_config.corpus_path(None);
+        let keyboard_size = toml_config
+            .run
+            .keyboard_size
+            .as_deref()
+            .unwrap_or("3x10")
+            .to_string();
+
         App {
             seed_str: String::new(),
-            iter_str: "50000".to_string(),
-            restart_str: "3000".to_string(),
-            corpus_path_str: "corpus.txt".to_string(),
-            keyboard_size_str_input: "3x10".to_string(),
+            iter_str: search_config.max_iter.to_string(),
+            restart_str: search_config.restart_after.to_string(),
+            corpus_path_str: corpus_path,
+            keyboard_size_str_input: keyboard_size,
             stop_flag: Arc::new(AtomicBool::new(false)),
             rx: None,
             running: false,
