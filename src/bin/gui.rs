@@ -223,10 +223,12 @@ impl App {
             };
 
             let mut rng = SmallRng::seed_from_u64(seed);
+            let l1_only = toml_config.build_l1_only_set();
             let ctx = SearchContext {
                 corpus: &corpus,
                 weights: &weights,
                 pairs: &exclusive_pairs,
+                l1_only: &l1_only,
             };
 
             let initial = search::build_initial_layout(&ctx, kp, &mut log_writer);

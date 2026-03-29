@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::chars::{self, MAX_CHARS};
+use crate::chars::{self, CharId, MAX_CHARS};
 use crate::cost::Weights;
 use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
 use crate::search::SearchConfig;
@@ -175,6 +175,9 @@ pub struct ConstraintsConfig {
     pub exclusive_pairs: Vec<ExclusivePairConfig>,
     /// プリセット名: "all-daku" または "i-daku"（未指定は None）
     pub preset: Option<String>,
+    /// Layer 1 に固定する文字（省略時: "゛゜"）
+    /// 空文字列 "" で全文字がレイヤー間移動可能になる
+    pub l1_only: Option<String>,
 }
 
 /// [[constraints.exclusive_pairs]] の1エントリ
@@ -239,6 +242,15 @@ impl Config {
         }
 
         result
+    }
+
+    /// L1固定文字セットを構築する（省略時は゛゜がデフォルト）
+    pub fn build_l1_only_set(&self) -> HashSet<CharId> {
+        let char_map = chars::build_char_to_id();
+        let text = self.constraints.l1_only.as_deref().unwrap_or("゛゜");
+        text.chars()
+            .filter_map(|c| char_map.get(&c).copied())
+            .collect()
     }
 
     /// プリセットに基づいて daku_l2_trigger 配列を生成する

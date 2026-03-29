@@ -269,10 +269,12 @@ fn main() {
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // ── 初期解生成 ───────────────────────────────
+    let l1_only = toml_config.build_l1_only_set();
     let ctx = search::SearchContext {
         corpus: &corpus,
         weights: &weights,
         pairs: &exclusive_pairs,
+        l1_only: &l1_only,
     };
     let initial_layout = search::build_initial_layout(&ctx, kp, &mut out);
     let _ = writeln!(out, "【初期解】");

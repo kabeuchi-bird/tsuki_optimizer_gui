@@ -1,11 +1,12 @@
 // search.rs — タブーサーチ本体
 
 use rand::prelude::*;
+use std::collections::HashSet;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, MAX_CHARS, VOID_CHAR_FIRST};
+use crate::chars::{CharId, MAX_CHARS, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
 use crate::cost::{delta_score, score, DeltaScoreBuffer, Weights};
 use crate::layout::{
@@ -63,6 +64,7 @@ pub struct SearchContext<'a> {
     pub corpus: &'a Corpus,
     pub weights: &'a Weights,
     pub pairs: &'a [ExclusivePair],
+    pub l1_only: &'a HashSet<CharId>,
 }
 
 /// ——————————————————————————————
@@ -346,7 +348,7 @@ pub fn run(
             no_improve = 0;
 
             current = best.clone();
-            random_perturbation(&mut current, config.perturbation_swaps, rng, ctx.pairs);
+            random_perturbation(&mut current, config.perturbation_swaps, rng, ctx.pairs, ctx.l1_only);
             current_score = score(&current, ctx.corpus, ctx.weights);
 
             cur_tabu_l1 = config.tabu_l1;
@@ -507,7 +509,7 @@ fn generate_inter_layer_candidates(
     let kp = layout.kp;
 
     let mut l1_chars: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp) && !is_void(c))
+        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c))
         .map(|c| (c, ctx.corpus.unigrams[c as usize]))
         .collect();
     l1_chars.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
@@ -569,10 +571,11 @@ fn random_perturbation(
     n_swaps: usize,
     rng: &mut impl Rng,
     pairs: &[ExclusivePair],
+    l1_only: &HashSet<CharId>,
 ) {
     let kp = layout.kp;
     let l1_chars: Vec<CharId> = (0..kp.num_chars as CharId)
-        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp) && !is_void(c))
+        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, l1_only) && !is_void(c))
         .collect();
     let l2_chars: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| !layout.is_l1(c) && !is_void(c))
@@ -629,7 +632,7 @@ pub fn build_initial_layout(
 
     // 動かせる全文字を頻度降順にソート
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| !is_fixed(c, kp) && !is_l1_only_char(c) && !is_void(c))
+        .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
         .map(|c| (c, ctx.corpus.unigrams[c as usize]))
         .collect();
     movable.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
@@ -648,7 +651,7 @@ pub fn build_initial_layout(
         .filter(|&c| {
             layout.is_l1(c)
                 && !is_fixed(c, kp)
-                && !is_l1_only_char(c)
+                && !ctx.l1_only.contains(&c)
                 && !is_void(c)
                 && !l1_target_set.contains(&c)
         })
@@ -731,8 +734,3 @@ pub fn build_initial_layout(
     layout
 }
 
-/// l1_only文字（゛゜）かどうか
-#[inline]
-fn is_l1_only_char(c: CharId) -> bool {
-    c == DAKUTEN_ID || c == HANDAKUTEN_ID
-}
