@@ -34,7 +34,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "tsuki_optimize GUI",
+        &format!("tsuki_optimize v{}", env!("CARGO_PKG_VERSION")),
         options,
         Box::new(|cc| {
             setup_japanese_fonts(&cc.egui_ctx);

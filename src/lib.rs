@@ -29,7 +29,7 @@ pub fn write_config_summary(
     exclusive_pairs: &[layout::ExclusivePair],
 ) {
     let _ = writeln!(out, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    let _ = writeln!(out, " tsuki_optimize 実行設定");
+    let _ = writeln!(out, " tsuki_optimize v{} 実行設定", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " keyboard_size = {}", config::keyboard_size_str(kp));
     let _ = writeln!(out, " corpus        = {}", corpus_path);
