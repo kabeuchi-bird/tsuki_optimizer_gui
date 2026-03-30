@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 // gui.rs — tsuki_optimize GUI エントリポイント
 //
 // eframe (egui) を使用し、最適化の進行をリアルタイム表示する。
