@@ -17,7 +17,7 @@ use egui_plot::{Line, PlotPoints, VLine};
 use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{score, score_breakdown, score_breakdown_data, Weights};
+use tsuki_optimize::cost::{score, score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, slot_col, KeyboardParams, KeyboardSize, SHIFT_SLOT_SENTINEL,
 };
@@ -190,9 +190,9 @@ impl App {
             self.seed_str.parse().unwrap_or_else(|_| rand::random())
         };
 
-        let corpus_path = &self.corpus_path_str;
-        let corpus = if Path::new(corpus_path).exists() {
-            Corpus::from_file(Path::new(corpus_path))
+        let corpus_path = self.corpus_path_str.clone();
+        let corpus = if Path::new(&corpus_path).exists() {
+            Corpus::from_file(Path::new(&corpus_path))
                 .unwrap_or_else(|_| Corpus::from_str(SAMPLE_CORPUS))
         } else {
             Corpus::from_str(SAMPLE_CORPUS)
@@ -251,8 +251,22 @@ impl App {
                 l1_only: &l1_only,
             };
 
+            // 設定サマリー出力
+            tsuki_optimize::write_config_summary(
+                &mut log_writer,
+                &kp,
+                &corpus_path,
+                seed,
+                &search_config,
+                &weights,
+                &toml_config,
+                &exclusive_pairs,
+            );
+
             let initial = search::build_initial_layout(&ctx, kp, &mut log_writer);
             let initial_score = score(&initial, &corpus, &weights);
+            tsuki_optimize::write_initial_layout(&mut log_writer, &initial, &corpus, &weights);
+
             let report_flag = Arc::new(AtomicBool::new(false));
 
             let best_layout = search::run(
@@ -269,18 +283,12 @@ impl App {
             );
 
             // 最終結果をログに出力
-            use std::io::Write;
-            let _ = writeln!(log_writer, "\n【最適化結果】");
-            best_layout.display(&mut log_writer);
-            score_breakdown(&best_layout, &corpus, &weights, &mut log_writer);
-            let best_score = score(&best_layout, &corpus, &weights);
-            let _ = writeln!(log_writer, "\n初期スコア : {:.4}", initial_score);
-            let _ = writeln!(log_writer, "最良スコア : {:.4}", best_score);
-            let _ = writeln!(
-                log_writer,
-                "改善幅     : {:.4}  ({:.2}%)",
-                initial_score - best_score,
-                (initial_score - best_score) / initial_score.abs() * 100.0
+            tsuki_optimize::write_final_result(
+                &mut log_writer,
+                &best_layout,
+                &corpus,
+                &weights,
+                initial_score,
             );
             let _ = log_writer.flush();
         });
