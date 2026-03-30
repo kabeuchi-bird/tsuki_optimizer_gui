@@ -97,6 +97,7 @@ struct App {
 
     // 最新の探索状態
     latest_update: Option<SearchUpdate>,
+    initial_score: Option<f64>,
 
     // スコア内訳表示用（探索開始時にコピーを保持）
     corpus: Option<Corpus>,
@@ -118,16 +119,33 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        // config.toml があれば読み込み、GUI の初期値に反映する
+        let config_path = Path::new("config.toml");
+        let toml_config = if config_path.exists() {
+            Config::from_file(config_path).unwrap_or_default()
+        } else {
+            Config::default()
+        };
+        let search_config = toml_config.build_search_config();
+        let corpus_path = toml_config.corpus_path(None);
+        let keyboard_size = toml_config
+            .run
+            .keyboard_size
+            .as_deref()
+            .unwrap_or("3x10")
+            .to_string();
+
         App {
             seed_str: String::new(),
-            iter_str: "50000".to_string(),
-            restart_str: "3000".to_string(),
-            corpus_path_str: "corpus.txt".to_string(),
-            keyboard_size_str_input: "3x10".to_string(),
+            iter_str: search_config.max_iter.to_string(),
+            restart_str: search_config.restart_after.to_string(),
+            corpus_path_str: corpus_path,
+            keyboard_size_str_input: keyboard_size,
             stop_flag: Arc::new(AtomicBool::new(false)),
             rx: None,
             running: false,
             latest_update: None,
+            initial_score: None,
             corpus: None,
             weights: None,
             log_rx: None,
@@ -188,6 +206,7 @@ impl App {
         self.best_history.clear();
         self.restart_iters.clear();
         self.latest_update = None;
+        self.initial_score = None;
         self.log_buffer.clear();
         self.stop_flag.store(false, Ordering::Relaxed);
         self.running = true;
@@ -278,6 +297,9 @@ impl App {
                         let iter = update.iter as f64;
                         self.score_history.push((iter, update.current_score));
                         self.best_history.push((iter, update.best_score));
+                        if self.initial_score.is_none() {
+                            self.initial_score = Some(update.current_score);
+                        }
                         if update.phase == SearchPhase::Restarting {
                             self.restart_iters.push(iter);
                         }
@@ -692,6 +714,13 @@ impl App {
             ui.label(format!("最良スコア: {:.4}", upd.best_score));
             ui.separator();
             ui.label(format!("現在スコア: {:.4}", upd.current_score));
+            if let Some(init) = self.initial_score {
+                if init > 0.0 {
+                    let improvement = (init - upd.best_score) / init * 100.0;
+                    ui.separator();
+                    ui.label(format!("改善率: {:.2}%", improvement));
+                }
+            }
             ui.separator();
             ui.label(format!("イテレーション: {}", upd.iter));
             ui.separator();
