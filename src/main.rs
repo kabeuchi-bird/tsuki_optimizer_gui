@@ -29,10 +29,9 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tsuki_optimize::chars::CHAR_LIST;
-use tsuki_optimize::config::{keyboard_size_str, Config};
+use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{score, score_breakdown};
+use tsuki_optimize::cost::score;
 use tsuki_optimize::layout;
 use tsuki_optimize::search;
 
@@ -196,77 +195,16 @@ fn main() {
     let mut out = TeeWriter::new(log_file);
 
     // ── 設定サマリ表示 ───────────────────────────
-    let _ = writeln!(out, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    let _ = writeln!(out, " tsuki_optimize 実行設定");
-    let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    let _ = writeln!(out, " keyboard_size = {}", keyboard_size_str(&kp));
-    let _ = writeln!(out, " corpus        = {}", corpus_path);
-    let _ = writeln!(out, " seed          = {}", seed);
-    let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
-    let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
-    let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
-    let _ = writeln!(
-        out,
-        " tabu           l1={} l2={} inter={}",
-        search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter
+    tsuki_optimize::write_config_summary(
+        &mut out,
+        &kp,
+        &corpus_path,
+        seed,
+        &search_config,
+        &weights,
+        &toml_config,
+        &exclusive_pairs,
     );
-    let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
-    let _ = writeln!(
-        out,
-        " perturbation  = {} swaps/restart",
-        search_config.perturbation_swaps
-    );
-    let _ = writeln!(
-        out,
-        " tenure         grow_threshold={:.2}  grow_interval={}  max_scale={:.1}",
-        search_config.tenure_grow_threshold,
-        search_config.tenure_grow_interval,
-        search_config.tenure_max_scale
-    );
-    let _ = writeln!(out, " stroke_scale  = {:.1}", weights.stroke_scale);
-    let _ = writeln!(
-        out,
-        " penalties      same_key={:.1}  same_finger={:.1}  upper_lower={:.1}  same_hand={:.2}",
-        weights.same_key_penalty,
-        weights.same_finger_penalty,
-        weights.upper_lower_jump,
-        weights.same_hand_base
-    );
-    let _ = writeln!(
-        out,
-        " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}",
-        weights.alternation_bonus,
-        weights.outroll_bonus,
-        weights.inroll_bonus,
-        weights.quasi_alt_bonus
-    );
-    if let Some(p) = &toml_config.constraints.preset {
-        let _ = writeln!(out, " constraints.preset = {}", p);
-    }
-    if exclusive_pairs.is_empty() {
-        let _ = writeln!(out, " exclusive_pairs = (なし)");
-    } else {
-        for pair in &exclusive_pairs {
-            let a: String = pair
-                .group_a
-                .iter()
-                .map(|&c| CHAR_LIST[c as usize])
-                .collect();
-            let b: String = pair
-                .group_b
-                .iter()
-                .map(|&c| CHAR_LIST[c as usize])
-                .collect();
-            let _ = writeln!(out, " exclusive_pair  A={}  B={}", a, b);
-        }
-    }
-    let _ = writeln!(out, " slot_difficulty:");
-    let nc = kp.num_cols as usize;
-    for (r, row) in weights.slot_difficulty.iter().enumerate() {
-        let label = ["  上段(row0)", "  中段(row1)", "  下段(row2)"][r];
-        let _ = writeln!(out, "{} {:?}", label, &row[..nc]);
-    }
-    let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // ── 初期解生成 ───────────────────────────────
     let l1_only = toml_config.build_l1_only_set();
@@ -277,10 +215,8 @@ fn main() {
         l1_only: &l1_only,
     };
     let initial_layout = search::build_initial_layout(&ctx, kp, &mut out);
-    let _ = writeln!(out, "【初期解】");
-    initial_layout.display(&mut out);
     let initial_score = score(&initial_layout, &corpus, &weights);
-    score_breakdown(&initial_layout, &corpus, &weights, &mut out);
+    tsuki_optimize::write_initial_layout(&mut out, &initial_layout, &corpus, &weights);
 
     // ── シグナルハンドラ登録 ─────────────────────
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -308,19 +244,7 @@ fn main() {
     );
 
     // ── 結果表示 ─────────────────────────────────
-    let _ = writeln!(out, "\n【最適化結果】");
-    best_layout.display(&mut out);
-    score_breakdown(&best_layout, &corpus, &weights, &mut out);
-
-    let score_best = score(&best_layout, &corpus, &weights);
-    let _ = writeln!(out, "\n初期スコア : {:.4}", initial_score);
-    let _ = writeln!(out, "最良スコア : {:.4}", score_best);
-    let _ = writeln!(
-        out,
-        "改善幅     : {:.4}  ({:.2}%)",
-        initial_score - score_best,
-        (initial_score - score_best) / initial_score.abs() * 100.0
-    );
+    tsuki_optimize::write_final_result(&mut out, &best_layout, &corpus, &weights, initial_score);
     let _ = out.flush();
 }
 
