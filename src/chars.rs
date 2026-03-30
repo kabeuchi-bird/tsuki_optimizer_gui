@@ -47,12 +47,6 @@ pub const KUTEN_ID: CharId = 17;
 pub const DAKUTEN_ID: CharId = 18;
 /// 半濁点「゜」のCharId（L1固定・L1内移動可）
 pub const HANDAKUTEN_ID: CharId = 29;
-/// 開きカギ括弧「「」のCharId（3x11のみ）
-#[allow(dead_code)]
-pub const KAGIKAKO_OPEN_ID: CharId = 60;
-/// 閉じカギ括弧「」」のCharId（3x11のみ）
-#[allow(dead_code)]
-pub const KAGIKAKO_CLOSE_ID: CharId = 61;
 /// void文字の最初のID（62, 63 は空きスロット代替）
 pub const VOID_CHAR_FIRST: CharId = 62;
 

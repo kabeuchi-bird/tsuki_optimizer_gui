@@ -163,7 +163,7 @@ pub fn run(
     on_update: &mut impl FnMut(&SearchUpdate),
     out: &mut impl Write,
 ) -> Layout {
-    let mut current = initial_layout.clone();
+    let mut current = initial_layout;
     let mut current_score = score(&current, ctx.corpus, ctx.weights);
 
     let mut best = current.clone();
@@ -399,16 +399,17 @@ pub fn run(
         "探索完了: {} iter, {} restarts | 最良スコア={:.4}",
         iter, restarts, best_score
     );
-    on_update(&SearchUpdate {
+    let final_update = SearchUpdate {
         iter,
         restarts,
         current_score,
         best_score,
-        best_layout: best.clone(),
+        best_layout: best,
         unigrams: ctx.corpus.unigrams,
         phase: SearchPhase::Finished,
-    });
-    best
+    };
+    on_update(&final_update);
+    final_update.best_layout
 }
 
 // ──────────────────────────────────────────────────────────────
