@@ -194,3 +194,29 @@ impl Corpus {
         adj
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_str_unigrams_normalized() {
+        let corpus = Corpus::from_str("ああいう");
+        let total: f64 = corpus.unigrams.iter().sum();
+        // ユニグラム頻度は正規化されている（合計 ≈ 1.0）
+        assert!((total - 1.0).abs() < 1e-10);
+        // 'あ' の頻度 > 'い' の頻度（2回 vs 1回）
+        let map = crate::chars::build_char_to_id();
+        let a_id = map[&'あ'] as usize;
+        let i_id = map[&'い'] as usize;
+        assert!(corpus.unigrams[a_id] > corpus.unigrams[i_id]);
+    }
+
+    #[test]
+    fn test_from_str_bigrams_nonempty() {
+        let corpus = Corpus::from_str("あいう");
+        // バイグラム隣接リストが空でない
+        let has_bigrams = corpus.bigram_adj.iter().any(|v| !v.is_empty());
+        assert!(has_bigrams);
+    }
+}

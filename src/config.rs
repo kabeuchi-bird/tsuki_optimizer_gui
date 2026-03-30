@@ -299,3 +299,26 @@ pub fn keyboard_size_str(kp: &KeyboardParams) -> &'static str {
         KeyboardSize::K3x11 => "3x11",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chars::{DAKUTEN_ID, HANDAKUTEN_ID};
+
+    #[test]
+    fn test_default_config_search() {
+        let config = Config::default();
+        let sc = config.build_search_config();
+        assert!(sc.max_iter > 0);
+        assert!(sc.restart_after > 0);
+        assert!(sc.tabu_l1 > 0);
+    }
+
+    #[test]
+    fn test_build_l1_only_set_default() {
+        let config = Config::default();
+        let set = config.build_l1_only_set();
+        assert!(set.contains(&DAKUTEN_ID));
+        assert!(set.contains(&HANDAKUTEN_ID));
+    }
+}
