@@ -696,10 +696,32 @@ impl App {
             .color(egui::Color32::from_rgb(50, 120, 220))
             .width(2.5);
 
+        // X軸の表示ウィンドウ幅（イテレーション数）
+        let window_width = 10_000.0;
+        let max_iter = self.score_history.last().map(|&(x, _)| x).unwrap_or(0.0);
+        let min_iter = (max_iter - window_width).max(0.0);
+
+        // 表示範囲内のデータからY軸の範囲を計算
+        let (mut y_min, mut y_max) = (f64::MAX, f64::MIN);
+        for &(x, y) in self.score_history.iter().chain(self.best_history.iter()) {
+            if x >= min_iter && x <= max_iter {
+                y_min = y_min.min(y);
+                y_max = y_max.max(y);
+            }
+        }
+        if y_min >= y_max {
+            y_min = 0.0;
+            y_max = 1.0;
+        }
+        let y_margin = (y_max - y_min) * 0.05;
+
         egui_plot::Plot::new("score_plot")
             .legend(egui_plot::Legend::default())
             .x_axis_label("iteration")
             .y_axis_label("score")
+            .allow_drag(true)
+            .allow_zoom(true)
+            .allow_scroll(true)
             .show(ui, |plot_ui| {
                 plot_ui.line(current_line);
                 plot_ui.line(best_line);
@@ -709,6 +731,13 @@ impl App {
                             .color(egui::Color32::from_rgba_premultiplied(220, 80, 80, 100))
                             .width(1.0),
                     );
+                }
+                // ユーザーが手動操作していない場合のみ自動追従
+                if plot_ui.auto_bounds() == [true, true].into() {
+                    plot_ui.set_plot_bounds(egui_plot::PlotBounds::from_min_max(
+                        [min_iter, y_min - y_margin],
+                        [max_iter + window_width * 0.02, y_max + y_margin],
+                    ));
                 }
             });
     }
