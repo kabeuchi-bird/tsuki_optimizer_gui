@@ -443,3 +443,64 @@ pub fn swap_would_violate(
     pair_violates_after_swap(layout, c1, c2, l1_s1, pairs)
         || (l1_s2 != l1_s1 && pair_violates_after_swap(layout, c1, c2, l1_s2, pairs))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chars::{KUTEN_ID, TOUTEN_ID};
+
+    #[test]
+    fn test_slot_col_row() {
+        // 3x10: slot 0 = row0, col0
+        assert_eq!(slot_col(0, 10), 0);
+        assert_eq!(slot_row(0, 10), 0);
+        // slot 15 = row1, col5
+        assert_eq!(slot_col(15, 10), 5);
+        assert_eq!(slot_row(15, 10), 1);
+    }
+
+    #[test]
+    fn test_col_to_finger() {
+        assert_eq!(col_to_finger(0), 0); // 左小指
+        assert_eq!(col_to_finger(4), 3); // 左人差指
+        assert_eq!(col_to_finger(5), 4); // 右人差指
+        assert_eq!(col_to_finger(9), 7); // 右小指
+    }
+
+    #[test]
+    fn test_is_fixed_3x10() {
+        let kp = KeyboardParams::k3x10();
+        assert!(is_fixed(KUTEN_ID, kp));
+        assert!(is_fixed(TOUTEN_ID, kp));
+        assert!(!is_fixed(0, kp)); // 'そ' は固定ではない
+    }
+
+    #[test]
+    fn test_swap_chars_integrity() {
+        let kp = KeyboardParams::k3x10();
+        let mut layout = Layout::initial(kp);
+        let c1: CharId = 0;
+        let c2: CharId = 1;
+        let s1_before = layout.char_to_slot[c1 as usize];
+        let s2_before = layout.char_to_slot[c2 as usize];
+
+        layout.swap_chars(c1, c2);
+
+        // char_to_slot が入れ替わっている
+        assert_eq!(layout.char_to_slot[c1 as usize], s2_before);
+        assert_eq!(layout.char_to_slot[c2 as usize], s1_before);
+        // slot_to_char も整合
+        assert_eq!(layout.slot_to_char[s1_before as usize], c2);
+        assert_eq!(layout.slot_to_char[s2_before as usize], c1);
+    }
+
+    #[test]
+    fn test_initial_layout_3x10() {
+        let kp = KeyboardParams::k3x10();
+        let layout = Layout::initial(kp);
+        // 3x10: CharId i → SlotId i
+        assert_eq!(layout.char_to_slot[0], 0);
+        assert_eq!(layout.char_to_slot[59], 59);
+        assert_eq!(layout.slot_to_char[0], 0);
+    }
+}

@@ -473,3 +473,42 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     let _ = writeln!(out, "  準交互ボーナス: {:.4}", bd.tri_cost);
     let _ = writeln!(out, "  合計スコア    : {:.4}", bd.total);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::corpus::Corpus;
+    use crate::layout::{KeyboardParams, Layout};
+
+    fn test_fixtures() -> (Layout, Corpus, Weights) {
+        let kp = KeyboardParams::k3x10();
+        let layout = Layout::initial(kp);
+        let corpus = Corpus::from_str("あいうえおかきくけこさしすせそ");
+        let weights = Weights::default();
+        (layout, corpus, weights)
+    }
+
+    #[test]
+    fn test_score_deterministic() {
+        let (layout, corpus, weights) = test_fixtures();
+        let s1 = score(&layout, &corpus, &weights);
+        let s2 = score(&layout, &corpus, &weights);
+        assert_eq!(s1, s2);
+        assert!(s1.is_finite());
+    }
+
+    #[test]
+    fn test_score_breakdown_matches_score() {
+        let (layout, corpus, weights) = test_fixtures();
+        let s = score(&layout, &corpus, &weights);
+        let bd = score_breakdown_data(&layout, &corpus, &weights);
+        assert!((s - bd.total).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_key_pair_cost_same_key() {
+        let w = Weights::default();
+        // 同一キー → same_key_penalty
+        assert_eq!(key_pair_cost(0, 0, &w), w.same_key_penalty);
+    }
+}

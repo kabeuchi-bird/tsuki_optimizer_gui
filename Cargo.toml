@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "gui"
-path = "src/bin/gui.rs"
+path = "src/bin/gui/main.rs"
 
 [dependencies]
 rand  = { version = "0.8", features = ["small_rng"] }

@@ -135,3 +135,41 @@ impl ArrayVec2 {
         &self.data[..self.len as usize]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_char_to_id() {
+        let map = build_char_to_id();
+        assert_eq!(map.len(), 62); // 実文字のみ (void除外)
+        assert_eq!(map[&'そ'], 0);
+        assert_eq!(map[&'゛'], DAKUTEN_ID);
+        assert_eq!(map[&'゜'], HANDAKUTEN_ID);
+    }
+
+    #[test]
+    fn test_decompose_plain() {
+        let map = build_char_to_id();
+        let result = decompose('あ', &map);
+        assert_eq!(result.as_slice().len(), 1);
+        assert_eq!(result.as_slice()[0], map[&'あ']);
+    }
+
+    #[test]
+    fn test_decompose_voiced() {
+        let map = build_char_to_id();
+        let result = decompose('が', &map);
+        assert_eq!(result.as_slice().len(), 2);
+        assert_eq!(result.as_slice()[0], map[&'か']);
+        assert_eq!(result.as_slice()[1], DAKUTEN_ID);
+    }
+
+    #[test]
+    fn test_decompose_unknown() {
+        let map = build_char_to_id();
+        let result = decompose('A', &map);
+        assert_eq!(result.as_slice().len(), 0);
+    }
+}
