@@ -5,12 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -70,3 +74,17 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/
+
+      - name: Package release asset
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          cd dist
+          7z a ../${{ matrix.artifact_name }}.zip .
+          cd ..
+
+      - name: Attach asset to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}.zip

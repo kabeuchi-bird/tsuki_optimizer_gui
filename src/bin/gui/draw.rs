@@ -261,7 +261,8 @@ impl App {
             .y_axis_label("score")
             .allow_drag(true)
             .allow_zoom(true)
-            .allow_scroll(true)
+            .allow_scroll(false)
+            .grid_spacing(egui::Rangef::new(80.0, 200.0))
             .show(ui, |plot_ui| {
                 plot_ui.line(current_line);
                 plot_ui.line(best_line);
