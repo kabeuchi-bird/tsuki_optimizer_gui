@@ -24,6 +24,8 @@ pub enum ColorData {
     },
     Frequency {
         max_freq: f64,
+        /// シフトキーの打鍵頻度 [shift_left, shift_right]
+        shift_freq: [f64; 2],
     },
     None,
 }

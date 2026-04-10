@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::chars::{CharId, DAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID};
+use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID};
 use crate::corpus::Corpus;
 use crate::layout::{
     col_to_finger, keystrokes_for_slot, slot_after_swap, slot_col, slot_hand, slot_row, Hand,
@@ -46,6 +46,10 @@ pub struct Weights {
     /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
     /// （デフォルトはすべて false = 削減なし）
     pub daku_l2_trigger: [bool; MAX_CHARS],
+
+    /// プリセット有効時: この文字がL2に配置されているとき、直後の゜コストを -stroke_scale 削減する
+    /// （は行: は,ひ,ふ,へ,ほ が対象。デフォルトはすべて false = 削減なし）
+    pub handaku_l2_trigger: [bool; MAX_CHARS],
 }
 
 impl Default for Weights {
@@ -72,6 +76,7 @@ impl Default for Weights {
             inroll_bonus: 0.15,
             quasi_alt_bonus: 0.1,
             daku_l2_trigger: [false; MAX_CHARS],
+            handaku_l2_trigger: [false; MAX_CHARS],
         }
     }
 }
@@ -156,6 +161,17 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
     // delta_score() は slot_after_swap() で仮スロットを渡すため追加実装不要
     if c2 == DAKUTEN_ID
         && w.daku_l2_trigger[c1 as usize]
+        && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
+    {
+        let nc = w.kp.num_cols;
+        let shift_slot = ks1.first();
+        let shift_diff =
+            w.slot_difficulty[slot_row(shift_slot, nc) as usize][slot_col(shift_slot, nc) as usize];
+        cost -= w.stroke_scale + shift_diff;
+    }
+    // L2配置の半濁音基音（は行）→ ゜ のとき、同様にシフトキー1打鍵分を削減
+    if c2 == HANDAKUTEN_ID
+        && w.handaku_l2_trigger[c1 as usize]
         && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
     {
         let nc = w.kp.num_cols;
