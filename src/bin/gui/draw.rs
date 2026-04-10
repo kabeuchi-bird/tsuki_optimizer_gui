@@ -2,8 +2,9 @@ use eframe::egui;
 use egui::epaint::StrokeKind;
 use egui_plot::{Line, PlotPoints, VLine};
 
-use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
-use tsuki_optimize::cost::score_breakdown_data;
+use tsuki_optimize::chars::{CharId, CHAR_LIST, DAKUTEN_ID, HANDAKUTEN_ID, MAX_CHARS, VOID_CHAR_FIRST};
+use tsuki_optimize::corpus::Corpus;
+use tsuki_optimize::cost::{score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, keystrokes_for_slot, slot_col, slot_hand, Hand, KeyboardSize,
     SHIFT_SLOT_SENTINEL,
@@ -29,7 +30,12 @@ impl App {
 
         // 色分けキャッシュ: 更新がなければ再計算しない
         if self.cached_color_data.is_none() {
-            self.cached_color_data = Some(precompute_color_data(self.color_mode, upd));
+            self.cached_color_data = Some(precompute_color_data(
+                self.color_mode,
+                upd,
+                self.corpus.as_ref(),
+                self.weights.as_ref(),
+            ));
         }
         let color_data = self.cached_color_data.as_ref().unwrap();
 
@@ -202,6 +208,15 @@ impl App {
                 let finger = col_to_finger(slot_col(s, kp.num_cols)) as usize;
                 finger_load[finger] += freq;
             }
+        }
+
+        // プリセット有効時: シフト→かな→゛/゜ のシフト打鍵省略分を差し引く
+        if let (Some(ref corpus), Some(ref weights)) = (&self.corpus, &self.weights) {
+            let omit = compute_shift_omit(layout, corpus, weights);
+            let left_finger = col_to_finger(slot_col(kp.shift_left, kp.num_cols)) as usize;
+            let right_finger = col_to_finger(slot_col(kp.shift_right, kp.num_cols)) as usize;
+            finger_load[left_finger] = (finger_load[left_finger] - omit[0]).max(0.0);
+            finger_load[right_finger] = (finger_load[right_finger] - omit[1]).max(0.0);
         }
 
         let finger_names = [
@@ -395,7 +410,12 @@ impl App {
 // ──────────────────────────────────────────────────────────────
 
 /// 色分けに必要な事前計算データ
-fn precompute_color_data(color_mode: ColorMode, upd: &SearchUpdate) -> ColorData {
+fn precompute_color_data(
+    color_mode: ColorMode,
+    upd: &SearchUpdate,
+    corpus: Option<&Corpus>,
+    weights: Option<&Weights>,
+) -> ColorData {
     let layout = &upd.best_layout;
     let kp = layout.kp;
     let nc = kp.num_chars;
@@ -467,6 +487,12 @@ fn precompute_color_data(color_mode: ColorMode, upd: &SearchUpdate) -> ColorData
                         shift_freq[0] += freq; // shift_left
                     }
                 }
+            }
+            // プリセット有効時: シフト→かな→゛/゜ のシフト打鍵省略分を差し引く
+            if let (Some(corpus), Some(weights)) = (corpus, weights) {
+                let omit = compute_shift_omit(layout, corpus, weights);
+                shift_freq[0] = (shift_freq[0] - omit[0]).max(0.0);
+                shift_freq[1] = (shift_freq[1] - omit[1]).max(0.0);
             }
             let max_freq = upd
                 .unigrams
@@ -558,4 +584,48 @@ fn char_color(
         }
         ColorData::None => egui::Color32::from_rgb(220, 220, 220),
     }
+}
+
+/// コーパスから特定バイグラム (c1, c2) の頻度を検索する
+fn lookup_bigram_freq(corpus: &Corpus, c1: CharId, c2: CharId) -> f64 {
+    for &idx in &corpus.bigram_adj[c1 as usize] {
+        let bg = &corpus.bigrams[idx];
+        if bg.c1 == c1 && bg.c2 == c2 {
+            return bg.freq;
+        }
+    }
+    0.0
+}
+
+/// プリセット有効時にシフト打鍵が省略される頻度をシフトキー別に返す
+/// [0] = shift_left の省略分, [1] = shift_right の省略分
+fn compute_shift_omit(
+    layout: &tsuki_optimize::layout::Layout,
+    corpus: &Corpus,
+    weights: &Weights,
+) -> [f64; 2] {
+    let kp = layout.kp;
+    let mut omit = [0.0f64; 2];
+    for c in 0..kp.num_chars as CharId {
+        if c >= VOID_CHAR_FIRST {
+            continue;
+        }
+        let slot = layout.char_to_slot[c as usize];
+        if (slot as usize) < kp.num_slots_per_layer as usize {
+            continue; // L1 はシフト不要
+        }
+        let physical = slot - kp.num_slots_per_layer;
+        let shift_idx = if slot_hand(physical, kp.num_cols) == Hand::Left {
+            1 // 左手文字 → shift_right
+        } else {
+            0 // 右手文字 → shift_left
+        };
+        if weights.daku_l2_trigger[c as usize] {
+            omit[shift_idx] += lookup_bigram_freq(corpus, c, DAKUTEN_ID);
+        }
+        if weights.handaku_l2_trigger[c as usize] {
+            omit[shift_idx] += lookup_bigram_freq(corpus, c, HANDAKUTEN_ID);
+        }
+    }
+    omit
 }

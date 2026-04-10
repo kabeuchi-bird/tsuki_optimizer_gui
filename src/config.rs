@@ -150,6 +150,7 @@ impl Config {
                 parse_difficulty_row(s.row2.as_deref(), d.slot_difficulty[2]),
             ],
             daku_l2_trigger: self.build_daku_l2_trigger(),
+            handaku_l2_trigger: self.build_handaku_l2_trigger(),
         }
     }
 
@@ -261,6 +262,25 @@ impl Config {
         let target_str = match self.constraints.preset.as_deref() {
             Some("all-daku") => "うかきくけこさしすせそたちつてとはひふへほ",
             Some("i-daku") => "きしちひ",
+            _ => return trigger,
+        };
+        let char_map = chars::build_char_to_id();
+        for c in target_str.chars() {
+            if let Some(&id) = char_map.get(&c) {
+                trigger[id as usize] = true;
+            }
+        }
+        trigger
+    }
+
+    /// プリセットに基づいて handaku_l2_trigger 配列を生成する
+    /// true の文字が L2 に配置されている状態で直後に゜が来ると -1打鍵のボーナスが入る
+    /// 対象はは行（は,ひ,ふ,へ,ほ）のみ
+    pub fn build_handaku_l2_trigger(&self) -> [bool; MAX_CHARS] {
+        let mut trigger = [false; MAX_CHARS];
+        let target_str = match self.constraints.preset.as_deref() {
+            Some("all-daku") => "はひふへほ",
+            Some("i-daku") => "ひ",
             _ => return trigger,
         };
         let char_map = chars::build_char_to_id();
