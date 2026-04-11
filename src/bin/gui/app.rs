@@ -56,6 +56,9 @@ pub struct App {
 
     // 設定ファイルエラー
     pub config_error: Option<String>,
+
+    // グラフ: ユーザーが操作（ドラッグ/ズーム）したら自動追従を止める
+    pub graph_follow: bool,
 }
 
 impl App {
@@ -98,6 +101,7 @@ impl App {
             show_layer2: false,
             cached_color_data: None,
             config_error: None,
+            graph_follow: true,
         }
     }
 
@@ -156,6 +160,7 @@ impl App {
         self.score_history.clear();
         self.best_history.clear();
         self.restart_iters.clear();
+        self.graph_follow = true;
         self.latest_update = None;
         self.initial_score = None;
         self.cached_color_data = None;

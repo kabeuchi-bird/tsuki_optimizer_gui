@@ -263,7 +263,7 @@ impl App {
         }
     }
 
-    pub fn draw_score_graph(&self, ui: &mut egui::Ui) {
+    pub fn draw_score_graph(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("スコア推移").strong().size(14.0));
 
         if self.score_history.is_empty() {
@@ -285,7 +285,10 @@ impl App {
 
         let window_width = 10_000.0;
         let max_iter = self.score_history.last().map(|&(x, _)| x).unwrap_or(0.0);
-        let min_iter = (max_iter - window_width).max(0.0);
+
+        // 500iter 以下はスライディングウィンドウではなく全データを表示
+        let warmup = max_iter <= 500.0;
+        let min_iter = if warmup { 0.0 } else { (max_iter - window_width).max(0.0) };
 
         let (mut y_min, mut y_max) = (f64::MAX, f64::MIN);
         for &(x, y) in self.score_history.iter().chain(self.best_history.iter()) {
@@ -300,13 +303,15 @@ impl App {
         }
         let y_margin = (y_max - y_min) * 0.05;
 
-        egui_plot::Plot::new("score_plot")
+        let follow = self.graph_follow;
+
+        let resp = egui_plot::Plot::new("score_plot")
             .legend(egui_plot::Legend::default())
             .x_axis_label("iteration")
             .y_axis_label("score")
             .allow_drag(true)
             .allow_zoom(true)
-            .allow_scroll(false)
+            .allow_scroll(true)
             .grid_spacing(egui::Rangef::new(80.0, 200.0))
             .show(ui, |plot_ui| {
                 plot_ui.line(current_line);
@@ -318,13 +323,23 @@ impl App {
                             .width(1.0),
                     );
                 }
-                if plot_ui.auto_bounds() == [true, true].into() {
+                // ウォームアップ中は毎フレーム範囲を再設定
+                // ウォームアップ後は自動追従モード時のみ再設定
+                if warmup || follow {
                     plot_ui.set_plot_bounds(egui_plot::PlotBounds::from_min_max(
                         [min_iter, y_min - y_margin],
                         [max_iter + window_width * 0.02, y_max + y_margin],
                     ));
                 }
             });
+
+        // ドラッグ・スクロール操作で自動追従を解除、ダブルクリックで復帰
+        if resp.response.dragged() || resp.response.hovered() && ui.input(|i| i.smooth_scroll_delta.length() > 0.0) {
+            self.graph_follow = false;
+        }
+        if resp.response.double_clicked() {
+            self.graph_follow = true;
+        }
     }
 
     pub fn draw_score_info(&self, ui: &mut egui::Ui) {
