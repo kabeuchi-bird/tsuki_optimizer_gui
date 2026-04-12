@@ -205,8 +205,10 @@ impl Layout {
     /// 初期配置を生成する
     ///
     /// 3x10: CharId i → SlotId i（既存の月配列2-263と一致）
-    /// 3x11: CharId 0..63 を、シフトキースロット（13, 18）を除いた
-    ///       スロット 0..65 に順番に割り当てる
+    /// 3x11: 月配列2-263を3x11に拡張した配置
+    ///       - L1 Row 0 col10 に「ち」、Row 1 col10 に「れ」を移動
+    ///       - 「、」「。」をL1 Row 2 col7,8 に配置
+    ///       - L2 col10 に「」と void を配置
     pub fn initial(kp: KeyboardParams) -> Self {
         let mut cts = [0u8; MAX_CHARS];
         let mut stc = [SHIFT_SLOT_SENTINEL; MAX_SLOTS];
@@ -219,19 +221,46 @@ impl Layout {
                 }
             }
             KeyboardSize::K3x11 => {
-                // シフトキースロット（13, 18）をスキップして文字スロットを割り当てる
-                let mut char_id = 0usize;
-                for slot in 0u8..kp.num_slots as u8 {
-                    if slot == kp.shift_left || slot == kp.shift_right {
-                        // stc[slot] は SHIFT_SLOT_SENTINEL のまま
-                        continue;
-                    }
-                    cts[char_id] = slot;
-                    stc[slot as usize] = char_id as CharId;
-                    char_id += 1;
-                    if char_id >= kp.num_chars {
-                        break;
-                    }
+                // 月配列2-263の3x11初期配置
+                //
+                // 3x11 スロット番号:
+                //   L1 Row 0: slot  0-10    L2 Row 0: slot 33-43
+                //   L1 Row 1: slot 11-21    L2 Row 1: slot 44-54
+                //   L1 Row 2: slot 22-32    L2 Row 2: slot 55-65
+                //   ☆ = slot 13 (L1のみ)  ★ = slot 18 (L1のみ)
+                //   L2 の slot 46,51 は文字スロット（★→☆キー / ☆→★キーでアクセス）
+                //
+                // Layer 1 (31文字スロット):
+                //   Row 0: そ こ し て ょ つ ん い の り ち
+                //   Row 1: は か ☆ と た く う ★ ゛ き れ
+                //   Row 2: す け に な さ っ る 、 。 ゜ □
+                // Layer 2 (33文字スロット):
+                //   Row 0: ぁ ひ ほ ふ め ぬ え み や ぇ 「
+                //   Row 1: ぃ を ら あ よ ま お も わ ゆ 」
+                //   Row 2: ぅ へ せ ゅ ゃ む ろ ね ー ぉ □
+                //
+                // 3x10 との差分:
+                //   ち(27): L1 Row2 col7 → L1 Row0 col10
+                //   れ(28): L1 Row2 col8 → L1 Row1 col10
+                //   、(12): L1 Row1 col2 → L1 Row2 col7（☆がcol2を占有）
+                //   。(17): L1 Row1 col7 → L1 Row2 col8（★がcol7を占有）
+                //   「(60): L2 Row0 col10（新規）
+                //   」(61): L2 Row1 col10（新規）
+                //   □(63): L1 Row2 col10、□(62): L2 Row2 col10（void）
+                #[rustfmt::skip]
+                let c2s: [SlotId; 64] = [
+                //  CharId:  0   1   2   3   4   5   6   7   8   9
+                /*  0- 9 */  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
+                /* 10-19 */ 11, 12, 29, 14, 15, 16, 17, 30, 19, 20,
+                /* 20-29 */ 22, 23, 24, 25, 26, 27, 28, 10, 21, 31,
+                /* 30-39 */ 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+                /* 40-49 */ 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+                /* 50-59 */ 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+                /* 60-63 */ 43, 54, 65, 32,
+                ];
+                for (c, &s) in c2s.iter().enumerate() {
+                    cts[c] = s;
+                    stc[s as usize] = c as CharId;
                 }
             }
         }
