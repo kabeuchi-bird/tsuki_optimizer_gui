@@ -46,6 +46,7 @@
 | `tsuki_optimize` (Windowsは `.exe`) | CLI版（コマンドラインで使う） |
 | `gui` (Windowsは `gui.exe`) | GUI版（ウィンドウで操作する） |
 | `config.toml` | 設定ファイル（パラメータ調整用） |
+| `corpus.txt` | サンプルコーパス（自分のテキストに差し替え可） |
 | `README.md` | このドキュメント |
 
 6. `gui`（または `gui.exe`）をダブルクリックすれば GUI が起動する
