@@ -67,6 +67,7 @@ jobs:
           cp target/release/tsuki_optimize${{ matrix.bin_suffix }} dist/
           cp target/release/gui${{ matrix.bin_suffix }} dist/
           cp config.toml dist/
+          cp corpus.txt dist/
           cp README.md dist/
 
       - name: Upload artifact

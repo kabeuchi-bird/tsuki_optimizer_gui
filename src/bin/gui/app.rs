@@ -12,7 +12,6 @@ use tsuki_optimize::layout::KeyboardParams;
 use tsuki_optimize::search::{self, SearchContext, SearchPhase, SearchUpdate};
 
 use super::log_writer::{ColorData, ColorMode, GuiLogWriter};
-use super::SAMPLE_CORPUS;
 
 // ──────────────────────────────────────────────────────────────
 // アプリケーション状態
@@ -65,10 +64,16 @@ impl App {
     pub fn new() -> Self {
         // config.toml があれば読み込み、GUI の初期値に反映する
         let config_path = Path::new("config.toml");
-        let toml_config = if config_path.exists() {
-            Config::from_file(config_path).unwrap_or_default()
+        let (toml_config, config_error) = if config_path.exists() {
+            match Config::from_file(config_path) {
+                Ok(c) => (c, None),
+                Err(e) => (
+                    Config::default(),
+                    Some(format!("config.toml 読み込みエラー（デフォルト値で起動）: {e}")),
+                ),
+            }
         } else {
-            Config::default()
+            (Config::default(), None)
         };
         let search_config = toml_config.build_search_config();
         let corpus_path = toml_config.corpus_path(None);
@@ -100,7 +105,7 @@ impl App {
             color_mode: ColorMode::Fitness,
             show_layer2: false,
             cached_color_data: None,
-            config_error: None,
+            config_error,
             graph_follow: true,
         }
     }
@@ -131,25 +136,58 @@ impl App {
         let mut search_config = toml_config.build_search_config();
         let weights = toml_config.build_weights(kp);
 
-        if let Ok(v) = self.iter_str.parse() {
-            search_config.max_iter = v;
+        // パラメータ入力欄のパース（空欄はデフォルト維持、不正値はエラー）
+        if !self.iter_str.is_empty() {
+            match self.iter_str.parse::<usize>() {
+                Ok(v) => search_config.max_iter = v,
+                Err(e) => {
+                    self.config_error =
+                        Some(format!("iter の値が不正です ('{}'): {e}", self.iter_str));
+                    return;
+                }
+            }
         }
-        if let Ok(v) = self.restart_str.parse() {
-            search_config.restart_after = v;
+        if !self.restart_str.is_empty() {
+            match self.restart_str.parse::<usize>() {
+                Ok(v) => search_config.restart_after = v,
+                Err(e) => {
+                    self.config_error = Some(format!(
+                        "restart の値が不正です ('{}'): {e}",
+                        self.restart_str
+                    ));
+                    return;
+                }
+            }
         }
 
         let seed: u64 = if self.seed_str.is_empty() {
             rand::random()
         } else {
-            self.seed_str.parse().unwrap_or_else(|_| rand::random())
+            match self.seed_str.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    self.config_error =
+                        Some(format!("seed の値が不正です ('{}'): {e}", self.seed_str));
+                    return;
+                }
+            }
         };
 
         let corpus_path = self.corpus_path_str.clone();
-        let corpus = if Path::new(&corpus_path).exists() {
-            Corpus::from_file(Path::new(&corpus_path))
-                .unwrap_or_else(|_| Corpus::from_str(SAMPLE_CORPUS))
-        } else {
-            Corpus::from_str(SAMPLE_CORPUS)
+        if !Path::new(&corpus_path).exists() {
+            self.config_error = Some(format!(
+                "コーパスファイルが見つかりません: {corpus_path}"
+            ));
+            return;
+        }
+        let corpus = match Corpus::from_file(Path::new(&corpus_path)) {
+            Ok(c) => c,
+            Err(e) => {
+                self.config_error = Some(format!(
+                    "コーパスファイルを読み込めません ({corpus_path}): {e}"
+                ));
+                return;
+            }
         };
 
         // GUI側でスコア内訳計算用にコピーを保持
@@ -177,17 +215,30 @@ impl App {
 
         // ログファイル作成
         let log_path = format!("log/{}.log", tsuki_optimize::local_timestamp());
-        let log_file = {
-            if let Some(parent) = Path::new(&log_path).parent() {
-                std::fs::create_dir_all(parent).ok();
+        if let Some(parent) = Path::new(&log_path).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.config_error = Some(format!(
+                    "ログディレクトリを作成できません ({}): {}",
+                    parent.display(),
+                    e
+                ));
+                self.running = false;
+                return;
             }
-            match File::create(&log_path) {
-                Ok(f) => Some(BufWriter::new(f)),
-                Err(_) => None,
+        }
+        let log_file = match File::create(&log_path) {
+            Ok(f) => BufWriter::new(f),
+            Err(e) => {
+                self.config_error = Some(format!(
+                    "ログファイルを作成できません ({log_path}): {e}"
+                ));
+                self.running = false;
+                return;
             }
         };
 
         let stop_flag = Arc::clone(&self.stop_flag);
+        let writer_stop_flag = Arc::clone(&self.stop_flag);
 
         std::thread::spawn(move || {
             use rand::rngs::SmallRng;
@@ -195,7 +246,8 @@ impl App {
 
             let mut log_writer = GuiLogWriter {
                 tx: log_tx,
-                file: log_file,
+                file: Some(log_file),
+                stop_flag: writer_stop_flag,
             };
 
             let mut rng = SmallRng::seed_from_u64(seed);

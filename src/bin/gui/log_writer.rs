@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use tsuki_optimize::chars::MAX_CHARS;
 
@@ -36,6 +38,7 @@ pub enum ColorData {
 pub struct GuiLogWriter {
     pub tx: mpsc::Sender<String>,
     pub file: Option<BufWriter<File>>,
+    pub stop_flag: Arc<AtomicBool>,
 }
 
 impl Write for GuiLogWriter {
@@ -43,14 +46,24 @@ impl Write for GuiLogWriter {
         let text = String::from_utf8_lossy(buf);
         let _ = self.tx.send(text.into_owned());
         if let Some(ref mut f) = self.file {
-            let _ = f.write_all(buf);
+            if let Err(e) = f.write_all(buf) {
+                let msg = format!("⚠ ログファイル書き込みエラー: {e}\n探索を中断します。\n");
+                let _ = self.tx.send(msg);
+                self.stop_flag.store(true, Ordering::Relaxed);
+                self.file = None;
+            }
         }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         if let Some(ref mut f) = self.file {
-            let _ = f.flush();
+            if let Err(e) = f.flush() {
+                let msg = format!("⚠ ログファイル書き込みエラー: {e}\n探索を中断します。\n");
+                let _ = self.tx.send(msg);
+                self.stop_flag.store(true, Ordering::Relaxed);
+                self.file = None;
+            }
         }
         Ok(())
     }
