@@ -177,17 +177,30 @@ impl App {
 
         // ログファイル作成
         let log_path = format!("log/{}.log", tsuki_optimize::local_timestamp());
-        let log_file = {
-            if let Some(parent) = Path::new(&log_path).parent() {
-                std::fs::create_dir_all(parent).ok();
+        if let Some(parent) = Path::new(&log_path).parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.config_error = Some(format!(
+                    "ログディレクトリを作成できません ({}): {}",
+                    parent.display(),
+                    e
+                ));
+                self.running = false;
+                return;
             }
-            match File::create(&log_path) {
-                Ok(f) => Some(BufWriter::new(f)),
-                Err(_) => None,
+        }
+        let log_file = match File::create(&log_path) {
+            Ok(f) => BufWriter::new(f),
+            Err(e) => {
+                self.config_error = Some(format!(
+                    "ログファイルを作成できません ({log_path}): {e}"
+                ));
+                self.running = false;
+                return;
             }
         };
 
         let stop_flag = Arc::clone(&self.stop_flag);
+        let writer_stop_flag = Arc::clone(&self.stop_flag);
 
         std::thread::spawn(move || {
             use rand::rngs::SmallRng;
@@ -195,7 +208,8 @@ impl App {
 
             let mut log_writer = GuiLogWriter {
                 tx: log_tx,
-                file: log_file,
+                file: Some(log_file),
+                stop_flag: writer_stop_flag,
             };
 
             let mut rng = SmallRng::seed_from_u64(seed);

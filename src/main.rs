@@ -27,7 +27,7 @@ use rand::SeedableRng;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tsuki_optimize::config::Config;
 use tsuki_optimize::corpus::Corpus;
@@ -37,15 +37,33 @@ use tsuki_optimize::search;
 
 // ──────────────────────────────────────────────────────────────
 // TeeWriter: stderr とログファイルの両方に書き込む
+//
+// ログファイル書き込みに失敗した場合は stop_flag を立てて探索を中断する。
+// 書き込みエラーは io_error に保持し、探索終了後に呼び出し側から参照する。
 // ──────────────────────────────────────────────────────────────
 struct TeeWriter {
     file: Option<BufWriter<File>>,
+    stop_flag: Arc<AtomicBool>,
+    io_error: Option<String>,
 }
 
 impl TeeWriter {
-    fn new(file: Option<File>) -> Self {
+    fn new(file: File, stop_flag: Arc<AtomicBool>) -> Self {
         TeeWriter {
-            file: file.map(BufWriter::new),
+            file: Some(BufWriter::new(file)),
+            stop_flag,
+            io_error: None,
+        }
+    }
+
+    fn record_error(&mut self, e: io::Error) {
+        if self.io_error.is_none() {
+            let msg = format!("ログファイル書き込みエラー: {e}");
+            eprintln!("エラー: {msg} → 探索を中断します。");
+            self.io_error = Some(msg);
+            self.stop_flag.store(true, Ordering::Relaxed);
+            // これ以上のファイル書き込み試行を停止
+            self.file = None;
         }
     }
 }
@@ -54,7 +72,9 @@ impl Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let _ = io::stderr().write_all(buf);
         if let Some(ref mut f) = self.file {
-            let _ = f.write_all(buf);
+            if let Err(e) = f.write_all(buf) {
+                self.record_error(e);
+            }
         }
         Ok(buf.len())
     }
@@ -62,7 +82,9 @@ impl Write for TeeWriter {
     fn flush(&mut self) -> io::Result<()> {
         let _ = io::stderr().flush();
         if let Some(ref mut f) = self.file {
-            let _ = f.flush();
+            if let Err(e) = f.flush() {
+                self.record_error(e);
+            }
         }
         Ok(())
     }
@@ -170,29 +192,42 @@ fn main() {
         Corpus::from_str(SAMPLE_CORPUS)
     };
 
+    // ── シグナルハンドラ登録用のフラグを先に準備 ──
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let report_flag = Arc::new(AtomicBool::new(false));
+
     // ── ログファイル作成 + TeeWriter ─────────────
     let log_path = cli.get("--log").cloned().unwrap_or_else(|| {
         let ts = tsuki_optimize::local_timestamp();
         format!("log/{}.log", ts)
     });
 
-    let log_file = {
-        if let Some(parent) = Path::new(&log_path).parent() {
-            std::fs::create_dir_all(parent).ok();
+    if let Some(parent) = Path::new(&log_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "エラー: ログディレクトリを作成できません ({}): {}",
+                    parent.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
         }
-        match File::create(&log_path) {
-            Ok(f) => {
-                eprintln!("ログファイル: {}", log_path);
-                Some(f)
-            }
-            Err(e) => {
-                eprintln!("ログファイル作成失敗: {} ({})", log_path, e);
-                None
-            }
+    }
+    let log_file = match File::create(&log_path) {
+        Ok(f) => {
+            eprintln!("ログファイル: {}", log_path);
+            f
+        }
+        Err(e) => {
+            eprintln!(
+                "エラー: ログファイルを作成できません ({log_path}): {e}"
+            );
+            std::process::exit(1);
         }
     };
 
-    let mut out = TeeWriter::new(log_file);
+    let mut out = TeeWriter::new(log_file, Arc::clone(&stop_flag));
 
     // ── 設定サマリ表示 ───────────────────────────
     tsuki_optimize::write_config_summary(
@@ -219,8 +254,6 @@ fn main() {
     tsuki_optimize::write_initial_layout(&mut out, &initial_layout, &corpus, &weights);
 
     // ── シグナルハンドラ登録 ─────────────────────
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let report_flag = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
         use signal_hook::consts::{SIGINT, SIGUSR1};
@@ -246,6 +279,12 @@ fn main() {
     // ── 結果表示 ─────────────────────────────────
     tsuki_optimize::write_final_result(&mut out, &best_layout, &corpus, &weights, initial_score);
     let _ = out.flush();
+
+    // ── ログファイル書き込みエラーのチェック ──
+    if let Some(err) = out.io_error.as_ref() {
+        eprintln!("エラー: {err}");
+        std::process::exit(1);
+    }
 }
 
 fn parse_cli(args: &[String]) -> std::collections::HashMap<String, String> {
