@@ -150,46 +150,48 @@ fn main() {
     let mut weights = toml_config.build_weights(kp);
 
     if let Some(v) = cli.get("--iter") {
-        search_config.max_iter = v.parse().unwrap_or(search_config.max_iter);
+        search_config.max_iter = parse_cli_value("--iter", v);
     }
     if let Some(v) = cli.get("--restart") {
-        search_config.restart_after = v.parse().unwrap_or(search_config.restart_after);
+        search_config.restart_after = parse_cli_value("--restart", v);
     }
     if let Some(v) = cli.get("--max-restarts") {
-        search_config.max_restarts = v.parse().unwrap_or(search_config.max_restarts);
+        search_config.max_restarts = parse_cli_value("--max-restarts", v);
     }
     if let Some(v) = cli.get("--inter-sample") {
-        search_config.inter_sample = v.parse().unwrap_or(search_config.inter_sample);
+        search_config.inter_sample = parse_cli_value("--inter-sample", v);
     }
     if let Some(v) = cli.get("--log-interval") {
-        search_config.log_interval = v.parse().unwrap_or(search_config.log_interval);
+        search_config.log_interval = parse_cli_value("--log-interval", v);
     }
     if let Some(v) = cli.get("--stroke-scale") {
-        weights.stroke_scale = v.parse().unwrap_or(weights.stroke_scale);
+        weights.stroke_scale = parse_cli_value("--stroke-scale", v);
     }
 
     let corpus_path = toml_config.corpus_path(cli.get("--corpus").map(|s| s.as_str()));
-    let seed = toml_config.seed(cli.get("--seed").and_then(|s| s.parse().ok()));
+    let seed = {
+        let cli_seed = cli.get("--seed").map(|s| parse_cli_value::<u64>("--seed", s));
+        toml_config.seed(cli_seed)
+    };
 
     // ── コーパス読み込み ─────────────────────────
     let corpus_file = Path::new(&corpus_path);
-    let corpus = if corpus_file.exists() {
-        match Corpus::from_file(corpus_file) {
-            Ok(c) => {
-                eprintln!("コーパス: {}", corpus_file.display());
-                c
-            }
-            Err(e) => {
-                eprintln!("コーパス読み込みエラー: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
+    if !corpus_file.exists() {
         eprintln!(
-            "コーパスファイルが見つかりません: {}  → サンプルテキストで起動",
+            "エラー: コーパスファイルが見つかりません: {}",
             corpus_path
         );
-        Corpus::from_str(SAMPLE_CORPUS)
+        std::process::exit(1);
+    }
+    let corpus = match Corpus::from_file(corpus_file) {
+        Ok(c) => {
+            eprintln!("コーパス: {}", corpus_file.display());
+            c
+        }
+        Err(e) => {
+            eprintln!("エラー: コーパス読み込み失敗: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // ── シグナルハンドラ登録用のフラグを先に準備 ──
@@ -301,10 +303,17 @@ fn parse_cli(args: &[String]) -> std::collections::HashMap<String, String> {
     map
 }
 
-const SAMPLE_CORPUS: &str = "\
-こんにちは。今日はいい天気ですね。\
-日本語入力の配列を最適化するためのプログラムです。\
-タブーサーチを用いて月配列の改変版を探索します。\
-かな文字の打鍵数と難易度を評価して最良の配置を求めます。\
-てにをはなどの助詞や、よく使う動詞・形容詞が打ちやすくなるように配置します。\
-";
+/// CLI 引数の値をパースし、失敗したらエラー出力して終了する
+fn parse_cli_value<T>(name: &str, value: &str) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match value.parse::<T>() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("エラー: {name} の値が不正です ('{value}'): {e}");
+            std::process::exit(1);
+        }
+    }
+}
