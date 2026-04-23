@@ -26,6 +26,19 @@ pub struct Corpus {
 
     /// トライグラム隣接リスト
     pub trigram_adj: Vec<Vec<usize>>,
+
+    /// コーパス構築時の統計情報
+    pub stats: CorpusStats,
+}
+
+#[derive(Clone, Default)]
+pub struct CorpusStats {
+    pub total_chars: u64,
+    pub skipped_chars: u64,
+    pub num_segments: usize,
+    pub num_unigrams: usize,
+    pub num_bigrams: usize,
+    pub num_trigrams: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -137,16 +150,14 @@ impl Corpus {
         let bigram_adj = Self::build_bigram_adj(&bigrams);
         let trigram_adj = Self::build_trigram_adj(&trigrams);
 
-        eprintln!(
-            "コーパス統計: 有効文字数={}, スキップ文字数={}, セグメント数={}, \
-             ユニグラム種={}, バイグラム種={}, トライグラム種={}",
+        let stats = CorpusStats {
             total_chars,
             skipped_chars,
-            segments.len(),
-            uni_count.iter().filter(|&&c| c > 0).count(),
-            bigrams.len(),
-            trigrams.len(),
-        );
+            num_segments: segments.len(),
+            num_unigrams: uni_count.iter().filter(|&&c| c > 0).count(),
+            num_bigrams: bigrams.len(),
+            num_trigrams: trigrams.len(),
+        };
 
         Corpus {
             unigrams,
@@ -154,7 +165,12 @@ impl Corpus {
             trigrams,
             bigram_adj,
             trigram_adj,
+            stats,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stats.total_chars == 0
     }
 
     fn empty() -> Self {
@@ -164,6 +180,7 @@ impl Corpus {
             trigrams: vec![],
             bigram_adj: vec![vec![]; MAX_CHARS],
             trigram_adj: vec![vec![]; MAX_CHARS],
+            stats: CorpusStats::default(),
         }
     }
 

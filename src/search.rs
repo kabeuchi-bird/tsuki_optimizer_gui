@@ -38,6 +38,9 @@ impl TabuList {
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
+        if self.capacity == 0 {
+            return;
+        }
         let key = normalize_pair(c1, c2);
         if self.entries.len() < self.capacity {
             self.entries.push(key);
@@ -145,6 +148,24 @@ impl Default for SearchConfig {
             tenure_grow_threshold: 0.5,
             tenure_grow_interval: 200,
             tenure_max_scale: 3.0,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// 設定値を検証し、問題があれば警告メッセージを返す
+    pub fn validate(&self, out: &mut impl Write) {
+        if self.max_iter == 0 {
+            let _ = writeln!(out, "警告: max_iter=0 → 探索は即座に終了します");
+        }
+        if self.log_interval == 0 {
+            let _ = writeln!(out, "警告: log_interval=0 → ログ出力を無効化します");
+        }
+        if self.tenure_grow_interval == 0 {
+            let _ = writeln!(out, "警告: tenure_grow_interval=0 → テニュア拡大を無効化します");
+        }
+        if self.restart_after == 0 {
+            let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
         }
     }
 }
@@ -302,7 +323,8 @@ pub fn run(
             }
         } else {
             no_improve += 1;
-            if no_improve > tenure_grow_start
+            if config.tenure_grow_interval > 0
+                && no_improve > tenure_grow_start
                 && (no_improve - tenure_grow_start).is_multiple_of(config.tenure_grow_interval)
             {
                 let max_l1 = (config.tabu_l1 as f64 * config.tenure_max_scale) as usize;
@@ -321,7 +343,7 @@ pub fn run(
             }
         }
 
-        if iter.is_multiple_of(config.log_interval) {
+        if config.log_interval > 0 && iter.is_multiple_of(config.log_interval) {
             let _ = writeln!(out,
                 "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure l1={} l2={} inter={}{}",
                 iter, current_score, best_score, no_improve,
@@ -339,7 +361,7 @@ pub fn run(
             });
         }
 
-        if no_improve >= config.restart_after {
+        if config.restart_after > 0 && no_improve >= config.restart_after {
             if restarts >= config.max_restarts {
                 let _ = writeln!(out, "最大再起動回数到達。探索終了。");
                 break;
