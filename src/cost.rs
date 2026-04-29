@@ -345,38 +345,41 @@ pub fn delta_score(
     }
 
     // トライグラム準交互差分
-    for &c in &[swap_c1, swap_c2] {
-        for &idx in &corpus.trigram_adj[c as usize] {
-            if buf.tri_stamp[idx] == gen {
-                continue;
+    // 両文字が同じ手にある場合、スワップしても手パターンは不変 → 差分ゼロ
+    if slot_hand(s1_old, w.kp.num_cols) != slot_hand(s2_old, w.kp.num_cols) {
+        for &c in &[swap_c1, swap_c2] {
+            for &idx in &corpus.trigram_adj[c as usize] {
+                if buf.tri_stamp[idx] == gen {
+                    continue;
+                }
+                buf.tri_stamp[idx] = gen;
+
+                let tg = &corpus.trigrams[idx];
+                if tg.freq == 0.0 {
+                    continue;
+                }
+
+                let h1_old = slot_hand(layout.char_to_slot[tg.c1 as usize], w.kp.num_cols);
+                let h2_old = slot_hand(layout.char_to_slot[tg.c2 as usize], w.kp.num_cols);
+                let h3_old = slot_hand(layout.char_to_slot[tg.c3 as usize], w.kp.num_cols);
+                let old_bonus = quasi_alt_bonus(h1_old, h2_old, h3_old, w);
+
+                let h1_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c1),
+                    w.kp.num_cols,
+                );
+                let h2_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c2),
+                    w.kp.num_cols,
+                );
+                let h3_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c3),
+                    w.kp.num_cols,
+                );
+                let new_bonus = quasi_alt_bonus(h1_new, h2_new, h3_new, w);
+
+                delta += tg.freq * (new_bonus - old_bonus);
             }
-            buf.tri_stamp[idx] = gen;
-
-            let tg = &corpus.trigrams[idx];
-            if tg.freq == 0.0 {
-                continue;
-            }
-
-            let h1_old = slot_hand(layout.char_to_slot[tg.c1 as usize], w.kp.num_cols);
-            let h2_old = slot_hand(layout.char_to_slot[tg.c2 as usize], w.kp.num_cols);
-            let h3_old = slot_hand(layout.char_to_slot[tg.c3 as usize], w.kp.num_cols);
-            let old_bonus = quasi_alt_bonus(h1_old, h2_old, h3_old, w);
-
-            let h1_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c1),
-                w.kp.num_cols,
-            );
-            let h2_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c2),
-                w.kp.num_cols,
-            );
-            let h3_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c3),
-                w.kp.num_cols,
-            );
-            let new_bonus = quasi_alt_bonus(h1_new, h2_new, h3_new, w);
-
-            delta += tg.freq * (new_bonus - old_bonus);
         }
     }
 
@@ -570,5 +573,32 @@ mod tests {
         let w = Weights::default();
         // 同一キー → same_key_penalty
         assert_eq!(key_pair_cost(0, 0, &w), w.same_key_penalty);
+    }
+
+    #[test]
+    fn test_delta_score_matches_full_rescore() {
+        let (layout, corpus, weights) = test_fixtures();
+        let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
+        let score_before = score(&layout, &corpus, &weights);
+
+        let kp = layout.kp;
+        let chars: Vec<crate::chars::CharId> = (0..kp.num_chars as crate::chars::CharId)
+            .filter(|&c| c < crate::chars::VOID_CHAR_FIRST)
+            .collect();
+
+        for i in 0..chars.len().min(10) {
+            for j in (i + 1)..chars.len().min(15) {
+                let (c1, c2) = (chars[i], chars[j]);
+                let d = delta_score(&layout, &corpus, &weights, c1, c2, &mut buf);
+                let mut layout2 = layout.clone();
+                layout2.swap_chars(c1, c2);
+                let score_after = score(&layout2, &corpus, &weights);
+                let expected = score_after - score_before;
+                assert!(
+                    (d - expected).abs() < 1e-10,
+                    "delta_score mismatch for ({c1},{c2}): got {d}, expected {expected}"
+                );
+            }
+        }
     }
 }
