@@ -274,19 +274,38 @@ pub fn run(
             break;
         }
 
-        candidates.sort_unstable_by(|a, b| a.delta.total_cmp(&b.delta));
+        // O(n) で最良候補を選択（ソート不要）
+        // best_free: タブーでない最良候補
+        // best_aspiration: タブーだがベストスコアを更新する最良候補
+        let mut best_free: Option<Candidate> = None;
+        let mut best_aspiration: Option<Candidate> = None;
+        let aspiration_threshold = best_score - current_score;
 
-        let chosen = candidates.iter().find(|cand| {
-            let tabu = match cand.kind {
+        for &cand in &candidates {
+            let is_tabu = match cand.kind {
                 OpKind::SwapL1 => tabu_l1.contains(cand.c1, cand.c2),
                 OpKind::SwapL2 => tabu_l2.contains(cand.c1, cand.c2),
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
             };
-            !tabu || (current_score + cand.delta < best_score)
-        });
+            if !is_tabu {
+                if best_free.is_none() || cand.delta < best_free.unwrap().delta {
+                    best_free = Some(cand);
+                }
+            } else if cand.delta < aspiration_threshold
+                && (best_aspiration.is_none() || cand.delta < best_aspiration.unwrap().delta)
+            {
+                best_aspiration = Some(cand);
+            }
+        }
 
-        let Some(chosen) = chosen else { continue };
-        let chosen = *chosen;
+        let chosen = match (best_free, best_aspiration) {
+            (Some(f), Some(a)) => {
+                if a.delta < f.delta { a } else { f }
+            }
+            (Some(f), None) => f,
+            (None, Some(a)) => a,
+            (None, None) => continue,
+        };
 
         current.swap_chars(chosen.c1, chosen.c2);
         current_score += chosen.delta;

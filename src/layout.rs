@@ -537,18 +537,21 @@ mod tests {
     fn test_initial_layout_3x11() {
         let kp = KeyboardParams::k3x11();
         let layout = Layout::initial(kp);
-        // char_to_slot と slot_to_char の双方向整合性
         for c in 0..64u8 {
             let s = layout.char_to_slot[c as usize];
-            assert_eq!(layout.slot_to_char[s as usize], c, "slot_to_char mismatch for char {c}");
+            assert_eq!(
+                layout.slot_to_char[s as usize], c,
+                "slot_to_char mismatch for char {c}"
+            );
         }
-        // シフトキースロットは SHIFT_SLOT_SENTINEL
-        assert_eq!(layout.slot_to_char[13], SHIFT_SLOT_SENTINEL); // ☆
-        assert_eq!(layout.slot_to_char[18], SHIFT_SLOT_SENTINEL); // ★
-        // 全64文字が一意なスロットに配置されている
+        assert_eq!(layout.slot_to_char[13], SHIFT_SLOT_SENTINEL);
+        assert_eq!(layout.slot_to_char[18], SHIFT_SLOT_SENTINEL);
         let mut slots_used: std::collections::HashSet<u8> = std::collections::HashSet::new();
         for c in 0..64u8 {
-            assert!(slots_used.insert(layout.char_to_slot[c as usize]), "duplicate slot for char {c}");
+            assert!(
+                slots_used.insert(layout.char_to_slot[c as usize]),
+                "duplicate slot for char {c}"
+            );
         }
     }
 }
