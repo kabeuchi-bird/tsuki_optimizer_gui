@@ -61,6 +61,106 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
 }
 
 /// ——————————————————————————————
+/// デルタスコアのペアキャッシュ（三角行列）
+///
+/// ペア (a, b) の delta_score を保持し、レイアウト変更時に
+/// 影響を受けるペアだけを無効化して再計算コストを抑える。
+/// ——————————————————————————————
+const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
+const VALID_WORDS: usize = NUM_PAIRS.div_ceil(64);
+
+struct DeltaPairCache {
+    values: Vec<f64>,
+    valid: [u64; VALID_WORDS],
+}
+
+impl DeltaPairCache {
+    fn new() -> Self {
+        DeltaPairCache {
+            values: vec![0.0; NUM_PAIRS],
+            valid: [0u64; VALID_WORDS],
+        }
+    }
+
+    #[inline]
+    fn pair_index(a: usize, b: usize) -> usize {
+        debug_assert!(a < b && b < MAX_CHARS);
+        a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+    }
+
+    #[inline]
+    fn get(&self, a: usize, b: usize) -> Option<f64> {
+        let idx = Self::pair_index(a, b);
+        if self.valid[idx / 64] & (1u64 << (idx % 64)) != 0 {
+            Some(self.values[idx])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, a: usize, b: usize, value: f64) {
+        let idx = Self::pair_index(a, b);
+        self.values[idx] = value;
+        self.valid[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    #[inline]
+    fn get_or_compute(
+        &mut self,
+        c1: CharId,
+        c2: CharId,
+        layout: &Layout,
+        corpus: &Corpus,
+        weights: &Weights,
+        buf: &mut DeltaScoreBuffer,
+    ) -> f64 {
+        let (a, b) = (c1.min(c2) as usize, c1.max(c2) as usize);
+        if let Some(cached) = self.get(a, b) {
+            return cached;
+        }
+        let d = delta_score(layout, corpus, weights, c1, c2, buf);
+        self.set(a, b, d);
+        d
+    }
+
+    fn invalidate_dirty(&mut self, dirty: u64) {
+        let mut bits = dirty;
+        while bits != 0 {
+            let c = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            for other in 0..c {
+                let idx = Self::pair_index(other, c);
+                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+            }
+            for other in (c + 1)..MAX_CHARS {
+                let idx = Self::pair_index(c, other);
+                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+            }
+        }
+    }
+
+    fn invalidate_all(&mut self) {
+        self.valid = [0u64; VALID_WORDS];
+    }
+}
+
+fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u64 {
+    let mut dirty = (1u64 << c1) | (1u64 << c2);
+    for &c in &[c1, c2] {
+        for &idx in &corpus.bigram_adj[c as usize] {
+            let bg = &corpus.bigrams[idx];
+            dirty |= (1u64 << bg.c1) | (1u64 << bg.c2);
+        }
+        for &idx in &corpus.trigram_adj[c as usize] {
+            let tg = &corpus.trigrams[idx];
+            dirty |= (1u64 << tg.c1) | (1u64 << tg.c2) | (1u64 << tg.c3);
+        }
+    }
+    dirty
+}
+
+/// ——————————————————————————————
 /// 探索コンテキスト（静的な入力データをまとめる）
 /// ——————————————————————————————
 pub struct SearchContext<'a> {
@@ -231,6 +331,7 @@ pub fn run(
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
+    let mut pair_cache = DeltaPairCache::new();
 
     while iter < config.max_iter {
         iter += 1;
@@ -247,6 +348,7 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         collect_l2_chars_into(&current, &mut l2_free);
@@ -259,6 +361,7 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         generate_inter_layer_candidates(
@@ -268,6 +371,7 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         if candidates.is_empty() {
@@ -309,6 +413,9 @@ pub fn run(
 
         current.swap_chars(chosen.c1, chosen.c2);
         current_score += chosen.delta;
+
+        let dirty = compute_dirty_mask(ctx.corpus, chosen.c1, chosen.c2);
+        pair_cache.invalidate_dirty(dirty);
 
         match chosen.kind {
             OpKind::SwapL1 => tabu_l1.add(chosen.c1, chosen.c2),
@@ -397,6 +504,7 @@ pub fn run(
                 ctx.l1_only,
             );
             current_score = score(&current, ctx.corpus, ctx.weights);
+            pair_cache.invalidate_all();
 
             cur_tabu_l1 = config.tabu_l1;
             cur_tabu_l2 = config.tabu_l2;
@@ -496,6 +604,7 @@ fn generate_swap_candidates(
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
     buf: &mut DeltaScoreBuffer,
+    cache: &mut DeltaPairCache,
 ) {
     let n = chars.len();
     if n < 2 {
@@ -510,7 +619,8 @@ fn generate_swap_candidates(
                 if swap_would_violate(layout, c1, c2, ctx.pairs) {
                     continue;
                 }
-                let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+                let delta =
+                    cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
                 out.push(Candidate {
                     kind,
                     c1,
@@ -533,7 +643,7 @@ fn generate_swap_candidates(
             if swap_would_violate(layout, c1, c2, ctx.pairs) {
                 continue;
             }
-            let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+            let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
             out.push(Candidate {
                 kind,
                 c1,
@@ -553,6 +663,7 @@ fn generate_inter_layer_candidates(
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
     buf: &mut DeltaScoreBuffer,
+    cache: &mut DeltaPairCache,
 ) {
     let kp = layout.kp;
 
@@ -586,7 +697,7 @@ fn generate_inter_layer_candidates(
         if swap_would_violate(layout, c1, c2, ctx.pairs) {
             continue;
         }
-        let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+        let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
         out.push(Candidate {
             kind: OpKind::InterLayer,
             c1,
