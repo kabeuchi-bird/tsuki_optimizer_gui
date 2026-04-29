@@ -2,9 +2,9 @@ use eframe::egui;
 use egui::epaint::StrokeKind;
 use egui_plot::{Line, PlotPoints, VLine};
 
-use tsuki_optimize::chars::{CharId, CHAR_LIST, DAKUTEN_ID, HANDAKUTEN_ID, MAX_CHARS, VOID_CHAR_FIRST};
+use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{score_breakdown_data, Weights};
+use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, keystrokes_for_slot, slot_col, slot_hand, Hand, KeyboardSize,
     SHIFT_SLOT_SENTINEL,
@@ -601,46 +601,3 @@ fn char_color(
     }
 }
 
-/// コーパスから特定バイグラム (c1, c2) の頻度を検索する
-fn lookup_bigram_freq(corpus: &Corpus, c1: CharId, c2: CharId) -> f64 {
-    for &idx in &corpus.bigram_adj[c1 as usize] {
-        let bg = &corpus.bigrams[idx];
-        if bg.c1 == c1 && bg.c2 == c2 {
-            return bg.freq;
-        }
-    }
-    0.0
-}
-
-/// プリセット有効時にシフト打鍵が省略される頻度をシフトキー別に返す
-/// [0] = shift_left の省略分, [1] = shift_right の省略分
-fn compute_shift_omit(
-    layout: &tsuki_optimize::layout::Layout,
-    corpus: &Corpus,
-    weights: &Weights,
-) -> [f64; 2] {
-    let kp = layout.kp;
-    let mut omit = [0.0f64; 2];
-    for c in 0..kp.num_chars as CharId {
-        if c >= VOID_CHAR_FIRST {
-            continue;
-        }
-        let slot = layout.char_to_slot[c as usize];
-        if (slot as usize) < kp.num_slots_per_layer as usize {
-            continue; // L1 はシフト不要
-        }
-        let physical = slot - kp.num_slots_per_layer;
-        let shift_idx = if slot_hand(physical, kp.num_cols) == Hand::Left {
-            1 // 左手文字 → shift_right
-        } else {
-            0 // 右手文字 → shift_left
-        };
-        if weights.daku_l2_trigger[c as usize] {
-            omit[shift_idx] += lookup_bigram_freq(corpus, c, DAKUTEN_ID);
-        }
-        if weights.handaku_l2_trigger[c as usize] {
-            omit[shift_idx] += lookup_bigram_freq(corpus, c, HANDAKUTEN_ID);
-        }
-    }
-    omit
-}

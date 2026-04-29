@@ -193,6 +193,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if corpus.is_empty() {
+        eprintln!("エラー: コーパスに認識可能な文字が含まれていません: {}", corpus_path);
+        std::process::exit(1);
+    }
 
     // ── シグナルハンドラ登録用のフラグを先に準備 ──
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -230,6 +234,12 @@ fn main() {
     };
 
     let mut out = TeeWriter::new(log_file, Arc::clone(&stop_flag));
+
+    // ── コーパス統計表示 ──────────────────────────
+    tsuki_optimize::write_corpus_stats(&mut out, &corpus.stats);
+
+    // ── 設定検証 ────────────────────────────────
+    search_config.validate(&mut out);
 
     // ── 設定サマリ表示 ───────────────────────────
     tsuki_optimize::write_config_summary(

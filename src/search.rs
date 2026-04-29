@@ -38,6 +38,9 @@ impl TabuList {
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
+        if self.capacity == 0 {
+            return;
+        }
         let key = normalize_pair(c1, c2);
         if self.entries.len() < self.capacity {
             self.entries.push(key);
@@ -55,6 +58,106 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
     } else {
         (b, a)
     }
+}
+
+/// ——————————————————————————————
+/// デルタスコアのペアキャッシュ（三角行列）
+///
+/// ペア (a, b) の delta_score を保持し、レイアウト変更時に
+/// 影響を受けるペアだけを無効化して再計算コストを抑える。
+/// ——————————————————————————————
+const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
+const VALID_WORDS: usize = NUM_PAIRS.div_ceil(64);
+
+struct DeltaPairCache {
+    values: Vec<f64>,
+    valid: [u64; VALID_WORDS],
+}
+
+impl DeltaPairCache {
+    fn new() -> Self {
+        DeltaPairCache {
+            values: vec![0.0; NUM_PAIRS],
+            valid: [0u64; VALID_WORDS],
+        }
+    }
+
+    #[inline]
+    fn pair_index(a: usize, b: usize) -> usize {
+        debug_assert!(a < b && b < MAX_CHARS);
+        a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+    }
+
+    #[inline]
+    fn get(&self, a: usize, b: usize) -> Option<f64> {
+        let idx = Self::pair_index(a, b);
+        if self.valid[idx / 64] & (1u64 << (idx % 64)) != 0 {
+            Some(self.values[idx])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, a: usize, b: usize, value: f64) {
+        let idx = Self::pair_index(a, b);
+        self.values[idx] = value;
+        self.valid[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    #[inline]
+    fn get_or_compute(
+        &mut self,
+        c1: CharId,
+        c2: CharId,
+        layout: &Layout,
+        corpus: &Corpus,
+        weights: &Weights,
+        buf: &mut DeltaScoreBuffer,
+    ) -> f64 {
+        let (a, b) = (c1.min(c2) as usize, c1.max(c2) as usize);
+        if let Some(cached) = self.get(a, b) {
+            return cached;
+        }
+        let d = delta_score(layout, corpus, weights, c1, c2, buf);
+        self.set(a, b, d);
+        d
+    }
+
+    fn invalidate_dirty(&mut self, dirty: u64) {
+        let mut bits = dirty;
+        while bits != 0 {
+            let c = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            for other in 0..c {
+                let idx = Self::pair_index(other, c);
+                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+            }
+            for other in (c + 1)..MAX_CHARS {
+                let idx = Self::pair_index(c, other);
+                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+            }
+        }
+    }
+
+    fn invalidate_all(&mut self) {
+        self.valid = [0u64; VALID_WORDS];
+    }
+}
+
+fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u64 {
+    let mut dirty = (1u64 << c1) | (1u64 << c2);
+    for &c in &[c1, c2] {
+        for &idx in &corpus.bigram_adj[c as usize] {
+            let bg = &corpus.bigrams[idx];
+            dirty |= (1u64 << bg.c1) | (1u64 << bg.c2);
+        }
+        for &idx in &corpus.trigram_adj[c as usize] {
+            let tg = &corpus.trigrams[idx];
+            dirty |= (1u64 << tg.c1) | (1u64 << tg.c2) | (1u64 << tg.c3);
+        }
+    }
+    dirty
 }
 
 /// ——————————————————————————————
@@ -149,6 +252,24 @@ impl Default for SearchConfig {
     }
 }
 
+impl SearchConfig {
+    /// 設定値を検証し、問題があれば警告メッセージを返す
+    pub fn validate(&self, out: &mut impl Write) {
+        if self.max_iter == 0 {
+            let _ = writeln!(out, "警告: max_iter=0 → 探索は即座に終了します");
+        }
+        if self.log_interval == 0 {
+            let _ = writeln!(out, "警告: log_interval=0 → ログ出力を無効化します");
+        }
+        if self.tenure_grow_interval == 0 {
+            let _ = writeln!(out, "警告: tenure_grow_interval=0 → テニュア拡大を無効化します");
+        }
+        if self.restart_after == 0 {
+            let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
+        }
+    }
+}
+
 /// ——————————————————————————————
 /// タブーサーチ本体
 /// ——————————————————————————————
@@ -210,6 +331,7 @@ pub fn run(
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
+    let mut pair_cache = DeltaPairCache::new();
 
     while iter < config.max_iter {
         iter += 1;
@@ -226,6 +348,7 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         collect_l2_chars_into(&current, &mut l2_free);
@@ -238,6 +361,7 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         generate_inter_layer_candidates(
@@ -247,28 +371,51 @@ pub fn run(
             rng,
             &mut candidates,
             &mut delta_buf,
+            &mut pair_cache,
         );
 
         if candidates.is_empty() {
             break;
         }
 
-        candidates.sort_unstable_by(|a, b| a.delta.total_cmp(&b.delta));
+        // O(n) で最良候補を選択（ソート不要）
+        // best_free: タブーでない最良候補
+        // best_aspiration: タブーだがベストスコアを更新する最良候補
+        let mut best_free: Option<Candidate> = None;
+        let mut best_aspiration: Option<Candidate> = None;
+        let aspiration_threshold = best_score - current_score;
 
-        let chosen = candidates.iter().find(|cand| {
-            let tabu = match cand.kind {
+        for &cand in &candidates {
+            let is_tabu = match cand.kind {
                 OpKind::SwapL1 => tabu_l1.contains(cand.c1, cand.c2),
                 OpKind::SwapL2 => tabu_l2.contains(cand.c1, cand.c2),
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
             };
-            !tabu || (current_score + cand.delta < best_score)
-        });
+            if !is_tabu {
+                if best_free.is_none() || cand.delta < best_free.unwrap().delta {
+                    best_free = Some(cand);
+                }
+            } else if cand.delta < aspiration_threshold
+                && (best_aspiration.is_none() || cand.delta < best_aspiration.unwrap().delta)
+            {
+                best_aspiration = Some(cand);
+            }
+        }
 
-        let Some(chosen) = chosen else { continue };
-        let chosen = *chosen;
+        let chosen = match (best_free, best_aspiration) {
+            (Some(f), Some(a)) => {
+                if a.delta < f.delta { a } else { f }
+            }
+            (Some(f), None) => f,
+            (None, Some(a)) => a,
+            (None, None) => continue,
+        };
 
         current.swap_chars(chosen.c1, chosen.c2);
         current_score += chosen.delta;
+
+        let dirty = compute_dirty_mask(ctx.corpus, chosen.c1, chosen.c2);
+        pair_cache.invalidate_dirty(dirty);
 
         match chosen.kind {
             OpKind::SwapL1 => tabu_l1.add(chosen.c1, chosen.c2),
@@ -302,7 +449,8 @@ pub fn run(
             }
         } else {
             no_improve += 1;
-            if no_improve > tenure_grow_start
+            if config.tenure_grow_interval > 0
+                && no_improve > tenure_grow_start
                 && (no_improve - tenure_grow_start).is_multiple_of(config.tenure_grow_interval)
             {
                 let max_l1 = (config.tabu_l1 as f64 * config.tenure_max_scale) as usize;
@@ -321,7 +469,7 @@ pub fn run(
             }
         }
 
-        if iter.is_multiple_of(config.log_interval) {
+        if config.log_interval > 0 && iter.is_multiple_of(config.log_interval) {
             let _ = writeln!(out,
                 "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure l1={} l2={} inter={}{}",
                 iter, current_score, best_score, no_improve,
@@ -339,7 +487,7 @@ pub fn run(
             });
         }
 
-        if no_improve >= config.restart_after {
+        if config.restart_after > 0 && no_improve >= config.restart_after {
             if restarts >= config.max_restarts {
                 let _ = writeln!(out, "最大再起動回数到達。探索終了。");
                 break;
@@ -356,6 +504,7 @@ pub fn run(
                 ctx.l1_only,
             );
             current_score = score(&current, ctx.corpus, ctx.weights);
+            pair_cache.invalidate_all();
 
             cur_tabu_l1 = config.tabu_l1;
             cur_tabu_l2 = config.tabu_l2;
@@ -455,6 +604,7 @@ fn generate_swap_candidates(
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
     buf: &mut DeltaScoreBuffer,
+    cache: &mut DeltaPairCache,
 ) {
     let n = chars.len();
     if n < 2 {
@@ -469,7 +619,8 @@ fn generate_swap_candidates(
                 if swap_would_violate(layout, c1, c2, ctx.pairs) {
                     continue;
                 }
-                let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+                let delta =
+                    cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
                 out.push(Candidate {
                     kind,
                     c1,
@@ -492,7 +643,7 @@ fn generate_swap_candidates(
             if swap_would_violate(layout, c1, c2, ctx.pairs) {
                 continue;
             }
-            let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+            let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
             out.push(Candidate {
                 kind,
                 c1,
@@ -512,6 +663,7 @@ fn generate_inter_layer_candidates(
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
     buf: &mut DeltaScoreBuffer,
+    cache: &mut DeltaPairCache,
 ) {
     let kp = layout.kp;
 
@@ -545,7 +697,7 @@ fn generate_inter_layer_candidates(
         if swap_would_violate(layout, c1, c2, ctx.pairs) {
             continue;
         }
-        let delta = delta_score(layout, ctx.corpus, ctx.weights, c1, c2, buf);
+        let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
         out.push(Candidate {
             kind: OpKind::InterLayer,
             c1,

@@ -101,6 +101,21 @@ pub fn write_config_summary(
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
+/// コーパス統計を出力する（CLI / GUI 共通）
+pub fn write_corpus_stats(out: &mut impl Write, stats: &corpus::CorpusStats) {
+    let _ = writeln!(
+        out,
+        "コーパス統計: 有効文字数={}, スキップ文字数={}, セグメント数={}, \
+         ユニグラム種={}, バイグラム種={}, トライグラム種={}",
+        stats.total_chars,
+        stats.skipped_chars,
+        stats.num_segments,
+        stats.num_unigrams,
+        stats.num_bigrams,
+        stats.num_trigrams,
+    );
+}
+
 /// 初期解を出力する（CLI / GUI 共通）
 pub fn write_initial_layout(
     out: &mut impl Write,

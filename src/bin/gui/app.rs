@@ -189,6 +189,12 @@ impl App {
                 return;
             }
         };
+        if corpus.is_empty() {
+            self.config_error = Some(format!(
+                "コーパスに認識可能な文字が含まれていません: {corpus_path}"
+            ));
+            return;
+        }
 
         // GUI側でスコア内訳計算用にコピーを保持
         self.corpus = Some(corpus.clone());
@@ -258,6 +264,12 @@ impl App {
                 pairs: &exclusive_pairs,
                 l1_only: &l1_only,
             };
+
+            // コーパス統計出力
+            tsuki_optimize::write_corpus_stats(&mut log_writer, &corpus.stats);
+
+            // 設定検証
+            search_config.validate(&mut log_writer);
 
             // 設定サマリー出力
             tsuki_optimize::write_config_summary(

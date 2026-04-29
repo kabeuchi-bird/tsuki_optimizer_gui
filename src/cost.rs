@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID};
+use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
 use crate::layout::{
     col_to_finger, keystrokes_for_slot, slot_after_swap, slot_col, slot_hand, slot_row, Hand,
@@ -345,38 +345,41 @@ pub fn delta_score(
     }
 
     // トライグラム準交互差分
-    for &c in &[swap_c1, swap_c2] {
-        for &idx in &corpus.trigram_adj[c as usize] {
-            if buf.tri_stamp[idx] == gen {
-                continue;
+    // 両文字が同じ手にある場合、スワップしても手パターンは不変 → 差分ゼロ
+    if slot_hand(s1_old, w.kp.num_cols) != slot_hand(s2_old, w.kp.num_cols) {
+        for &c in &[swap_c1, swap_c2] {
+            for &idx in &corpus.trigram_adj[c as usize] {
+                if buf.tri_stamp[idx] == gen {
+                    continue;
+                }
+                buf.tri_stamp[idx] = gen;
+
+                let tg = &corpus.trigrams[idx];
+                if tg.freq == 0.0 {
+                    continue;
+                }
+
+                let h1_old = slot_hand(layout.char_to_slot[tg.c1 as usize], w.kp.num_cols);
+                let h2_old = slot_hand(layout.char_to_slot[tg.c2 as usize], w.kp.num_cols);
+                let h3_old = slot_hand(layout.char_to_slot[tg.c3 as usize], w.kp.num_cols);
+                let old_bonus = quasi_alt_bonus(h1_old, h2_old, h3_old, w);
+
+                let h1_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c1),
+                    w.kp.num_cols,
+                );
+                let h2_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c2),
+                    w.kp.num_cols,
+                );
+                let h3_new = slot_hand(
+                    slot_after_swap(layout, swap_c1, swap_c2, tg.c3),
+                    w.kp.num_cols,
+                );
+                let new_bonus = quasi_alt_bonus(h1_new, h2_new, h3_new, w);
+
+                delta += tg.freq * (new_bonus - old_bonus);
             }
-            buf.tri_stamp[idx] = gen;
-
-            let tg = &corpus.trigrams[idx];
-            if tg.freq == 0.0 {
-                continue;
-            }
-
-            let h1_old = slot_hand(layout.char_to_slot[tg.c1 as usize], w.kp.num_cols);
-            let h2_old = slot_hand(layout.char_to_slot[tg.c2 as usize], w.kp.num_cols);
-            let h3_old = slot_hand(layout.char_to_slot[tg.c3 as usize], w.kp.num_cols);
-            let old_bonus = quasi_alt_bonus(h1_old, h2_old, h3_old, w);
-
-            let h1_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c1),
-                w.kp.num_cols,
-            );
-            let h2_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c2),
-                w.kp.num_cols,
-            );
-            let h3_new = slot_hand(
-                slot_after_swap(layout, swap_c1, swap_c2, tg.c3),
-                w.kp.num_cols,
-            );
-            let new_bonus = quasi_alt_bonus(h1_new, h2_new, h3_new, w);
-
-            delta += tg.freq * (new_bonus - old_bonus);
         }
     }
 
@@ -435,15 +438,19 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         if strokes == 1 {
             l1_coverage += freq;
         }
-        // 指負荷: 文字キーのカラムから指番号を決定
-        let physical_slot = if (slot as usize) < w.kp.num_slots_per_layer as usize {
-            slot
-        } else {
-            slot - w.kp.num_slots_per_layer
-        };
-        let finger = col_to_finger(slot_col(physical_slot, w.kp.num_cols)) as usize;
-        finger_load[finger] += freq;
+        let ks = keystrokes_for_slot(slot, w.kp);
+        for &s in ks.as_slice() {
+            let finger = col_to_finger(slot_col(s, w.kp.num_cols)) as usize;
+            finger_load[finger] += freq;
+        }
     }
+
+    // プリセット有効時: シフト→かな→゛/゜ のシフト打鍵省略分を差し引く
+    let omit = compute_shift_omit(layout, corpus, w);
+    let left_finger = col_to_finger(slot_col(w.kp.shift_left, w.kp.num_cols)) as usize;
+    let right_finger = col_to_finger(slot_col(w.kp.shift_right, w.kp.num_cols)) as usize;
+    finger_load[left_finger] = (finger_load[left_finger] - omit[0]).max(0.0);
+    finger_load[right_finger] = (finger_load[right_finger] - omit[1]).max(0.0);
     for bg in &corpus.bigrams {
         if bg.freq == 0.0 {
             continue;
@@ -490,6 +497,46 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     let _ = writeln!(out, "  合計スコア    : {:.4}", bd.total);
 }
 
+/// コーパスから特定バイグラム (c1, c2) の頻度を検索する
+pub fn lookup_bigram_freq(corpus: &Corpus, c1: CharId, c2: CharId) -> f64 {
+    for &idx in &corpus.bigram_adj[c1 as usize] {
+        let bg = &corpus.bigrams[idx];
+        if bg.c1 == c1 && bg.c2 == c2 {
+            return bg.freq;
+        }
+    }
+    0.0
+}
+
+/// プリセット有効時にシフト打鍵が省略される頻度をシフトキー別に返す
+/// [0] = shift_left の省略分, [1] = shift_right の省略分
+pub fn compute_shift_omit(layout: &Layout, corpus: &Corpus, weights: &Weights) -> [f64; 2] {
+    let kp = layout.kp;
+    let mut omit = [0.0f64; 2];
+    for c in 0..kp.num_chars as CharId {
+        if c >= VOID_CHAR_FIRST {
+            continue;
+        }
+        let slot = layout.char_to_slot[c as usize];
+        if (slot as usize) < kp.num_slots_per_layer as usize {
+            continue;
+        }
+        let physical = slot - kp.num_slots_per_layer;
+        let shift_idx = if slot_hand(physical, kp.num_cols) == Hand::Left {
+            1
+        } else {
+            0
+        };
+        if weights.daku_l2_trigger[c as usize] {
+            omit[shift_idx] += lookup_bigram_freq(corpus, c, DAKUTEN_ID);
+        }
+        if weights.handaku_l2_trigger[c as usize] {
+            omit[shift_idx] += lookup_bigram_freq(corpus, c, HANDAKUTEN_ID);
+        }
+    }
+    omit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +573,32 @@ mod tests {
         let w = Weights::default();
         // 同一キー → same_key_penalty
         assert_eq!(key_pair_cost(0, 0, &w), w.same_key_penalty);
+    }
+
+    #[test]
+    fn test_delta_score_matches_full_rescore() {
+        let (layout, corpus, weights) = test_fixtures();
+        let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
+        let score_before = score(&layout, &corpus, &weights);
+
+        let kp = layout.kp;
+        let chars: Vec<crate::chars::CharId> = (0..kp.num_chars as crate::chars::CharId)
+            .filter(|&c| c < crate::chars::VOID_CHAR_FIRST)
+            .collect();
+
+        for i in 0..chars.len().min(10) {
+            for j in (i + 1)..chars.len().min(15) {
+                let (c1, c2) = (chars[i], chars[j]);
+                let d = delta_score(&layout, &corpus, &weights, c1, c2, &mut buf);
+                let mut layout2 = layout.clone();
+                layout2.swap_chars(c1, c2);
+                let score_after = score(&layout2, &corpus, &weights);
+                let expected = score_after - score_before;
+                assert!(
+                    (d - expected).abs() < 1e-10,
+                    "delta_score mismatch for ({c1},{c2}): got {d}, expected {expected}"
+                );
+            }
+        }
     }
 }
