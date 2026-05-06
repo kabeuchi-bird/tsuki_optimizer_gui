@@ -21,6 +21,7 @@ struct TabuList {
     entries: Vec<(CharId, CharId)>,
     capacity: usize,
     head: usize,
+    bitset: [u64; VALID_WORDS],
 }
 
 impl TabuList {
@@ -29,12 +30,15 @@ impl TabuList {
             entries: Vec::with_capacity(capacity),
             capacity,
             head: 0,
+            bitset: [0u64; VALID_WORDS],
         }
     }
 
+    #[inline]
     fn contains(&self, c1: CharId, c2: CharId) -> bool {
-        let key = normalize_pair(c1, c2);
-        self.entries.contains(&key)
+        let (a, b) = normalize_pair(c1, c2);
+        let idx = pair_index(a as usize, b as usize);
+        self.bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
@@ -45,9 +49,14 @@ impl TabuList {
         if self.entries.len() < self.capacity {
             self.entries.push(key);
         } else {
+            let old = self.entries[self.head];
+            let old_idx = pair_index(old.0 as usize, old.1 as usize);
+            self.bitset[old_idx / BITS_PER_WORD] &= !(1u64 << (old_idx % BITS_PER_WORD));
             self.entries[self.head] = key;
             self.head = (self.head + 1) % self.capacity;
         }
+        let idx = pair_index(key.0 as usize, key.1 as usize);
+        self.bitset[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
     }
 }
 
@@ -60,15 +69,23 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
     }
 }
 
+/// ペアの三角行列インデックス（TabuList / DeltaPairCache 共用）
+const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
+const BITS_PER_WORD: usize = u64::BITS as usize;
+const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
+
+#[inline]
+fn pair_index(a: usize, b: usize) -> usize {
+    debug_assert!(a < b && b < MAX_CHARS);
+    a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+}
+
 /// ——————————————————————————————
 /// デルタスコアのペアキャッシュ（三角行列）
 ///
 /// ペア (a, b) の delta_score を保持し、レイアウト変更時に
 /// 影響を受けるペアだけを無効化して再計算コストを抑える。
 /// ——————————————————————————————
-const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
-const VALID_WORDS: usize = NUM_PAIRS.div_ceil(64);
-
 struct DeltaPairCache {
     values: Vec<f64>,
     valid: [u64; VALID_WORDS],
@@ -83,15 +100,9 @@ impl DeltaPairCache {
     }
 
     #[inline]
-    fn pair_index(a: usize, b: usize) -> usize {
-        debug_assert!(a < b && b < MAX_CHARS);
-        a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
-    }
-
-    #[inline]
     fn get(&self, a: usize, b: usize) -> Option<f64> {
-        let idx = Self::pair_index(a, b);
-        if self.valid[idx / 64] & (1u64 << (idx % 64)) != 0 {
+        let idx = pair_index(a, b);
+        if self.valid[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
             Some(self.values[idx])
         } else {
             None
@@ -100,9 +111,9 @@ impl DeltaPairCache {
 
     #[inline]
     fn set(&mut self, a: usize, b: usize, value: f64) {
-        let idx = Self::pair_index(a, b);
+        let idx = pair_index(a, b);
         self.values[idx] = value;
-        self.valid[idx / 64] |= 1u64 << (idx % 64);
+        self.valid[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
     }
 
     #[inline]
@@ -130,12 +141,12 @@ impl DeltaPairCache {
             let c = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             for other in 0..c {
-                let idx = Self::pair_index(other, c);
-                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+                let idx = pair_index(other, c);
+                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
             }
             for other in (c + 1)..MAX_CHARS {
-                let idx = Self::pair_index(c, other);
-                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+                let idx = pair_index(c, other);
+                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
             }
         }
     }
@@ -392,11 +403,11 @@ pub fn run(
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
             };
             if !is_tabu {
-                if best_free.is_none() || cand.delta < best_free.unwrap().delta {
+                if best_free.is_none_or(|f| cand.delta < f.delta) {
                     best_free = Some(cand);
                 }
             } else if cand.delta < aspiration_threshold
-                && (best_aspiration.is_none() || cand.delta < best_aspiration.unwrap().delta)
+                && best_aspiration.is_none_or(|a| cand.delta < a.delta)
             {
                 best_aspiration = Some(cand);
             }
