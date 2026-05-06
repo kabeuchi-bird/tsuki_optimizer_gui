@@ -67,7 +67,8 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
 /// 影響を受けるペアだけを無効化して再計算コストを抑える。
 /// ——————————————————————————————
 const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
-const VALID_WORDS: usize = NUM_PAIRS.div_ceil(64);
+const BITS_PER_WORD: usize = u64::BITS as usize;
+const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
 struct DeltaPairCache {
     values: Vec<f64>,
@@ -91,7 +92,7 @@ impl DeltaPairCache {
     #[inline]
     fn get(&self, a: usize, b: usize) -> Option<f64> {
         let idx = Self::pair_index(a, b);
-        if self.valid[idx / 64] & (1u64 << (idx % 64)) != 0 {
+        if self.valid[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
             Some(self.values[idx])
         } else {
             None
@@ -102,7 +103,7 @@ impl DeltaPairCache {
     fn set(&mut self, a: usize, b: usize, value: f64) {
         let idx = Self::pair_index(a, b);
         self.values[idx] = value;
-        self.valid[idx / 64] |= 1u64 << (idx % 64);
+        self.valid[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
     }
 
     #[inline]
@@ -131,11 +132,11 @@ impl DeltaPairCache {
             bits &= bits - 1;
             for other in 0..c {
                 let idx = Self::pair_index(other, c);
-                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
             }
             for other in (c + 1)..MAX_CHARS {
                 let idx = Self::pair_index(c, other);
-                self.valid[idx / 64] &= !(1u64 << (idx % 64));
+                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
             }
         }
     }
@@ -392,11 +393,11 @@ pub fn run(
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
             };
             if !is_tabu {
-                if best_free.is_none() || cand.delta < best_free.unwrap().delta {
+                if best_free.is_none_or(|f| cand.delta < f.delta) {
                     best_free = Some(cand);
                 }
             } else if cand.delta < aspiration_threshold
-                && (best_aspiration.is_none() || cand.delta < best_aspiration.unwrap().delta)
+                && best_aspiration.is_none_or(|a| cand.delta < a.delta)
             {
                 best_aspiration = Some(cand);
             }
