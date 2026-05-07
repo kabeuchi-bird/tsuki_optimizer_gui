@@ -46,6 +46,10 @@ impl TabuList {
             return;
         }
         let key = normalize_pair(c1, c2);
+        let idx = pair_index(key.0 as usize, key.1 as usize);
+        if self.bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
+            return;
+        }
         if self.entries.len() < self.capacity {
             self.entries.push(key);
         } else {
@@ -55,7 +59,6 @@ impl TabuList {
             self.entries[self.head] = key;
             self.head = (self.head + 1) % self.capacity;
         }
-        let idx = pair_index(key.0 as usize, key.1 as usize);
         self.bitset[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
     }
 }
