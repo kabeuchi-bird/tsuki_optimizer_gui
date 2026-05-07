@@ -344,6 +344,7 @@ pub fn run(
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
 
@@ -384,6 +385,7 @@ pub fn run(
             config.inter_sample,
             rng,
             &mut candidates,
+            &mut inter_bufs,
             &mut delta_buf,
             &mut pair_cache,
         );
@@ -670,44 +672,70 @@ fn generate_swap_candidates(
 }
 
 /// 操作C: 層間スワップ候補を頻度差ベースサンプリングで生成
+struct InterLayerBufs {
+    l1_chars: Vec<(CharId, f64)>,
+    l2_chars: Vec<(CharId, f64)>,
+    l1_weights: Vec<f64>,
+    l2_weights: Vec<f64>,
+}
+
+impl InterLayerBufs {
+    fn new(num_chars: usize) -> Self {
+        Self {
+            l1_chars: Vec::with_capacity(num_chars),
+            l2_chars: Vec::with_capacity(num_chars),
+            l1_weights: Vec::with_capacity(num_chars),
+            l2_weights: Vec::with_capacity(num_chars),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_inter_layer_candidates(
     layout: &Layout,
     ctx: &SearchContext,
     n_samples: usize,
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
+    ibufs: &mut InterLayerBufs,
     buf: &mut DeltaScoreBuffer,
     cache: &mut DeltaPairCache,
 ) {
     let kp = layout.kp;
 
-    let mut l1_chars: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c))
-        .map(|c| (c, ctx.corpus.unigrams[c as usize]))
-        .collect();
-    l1_chars.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    ibufs.l1_chars.clear();
+    ibufs.l1_chars.extend(
+        (0..kp.num_chars as CharId)
+            .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c))
+            .map(|c| (c, ctx.corpus.unigrams[c as usize])),
+    );
+    ibufs.l1_chars.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
-    let mut l2_chars: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| !layout.is_l1(c) && !is_void(c))
-        .map(|c| (c, ctx.corpus.unigrams[c as usize]))
-        .collect();
-    l2_chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    ibufs.l2_chars.clear();
+    ibufs.l2_chars.extend(
+        (0..kp.num_chars as CharId)
+            .filter(|&c| !layout.is_l1(c) && !is_void(c))
+            .map(|c| (c, ctx.corpus.unigrams[c as usize])),
+    );
+    ibufs.l2_chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    if l1_chars.is_empty() || l2_chars.is_empty() {
+    if ibufs.l1_chars.is_empty() || ibufs.l2_chars.is_empty() {
         return;
     }
 
-    let l1_weights: Vec<f64> = (0..l1_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
-    let l2_weights: Vec<f64> = (0..l2_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
-    let l1_w_sum: f64 = l1_weights.iter().sum();
-    let l2_w_sum: f64 = l2_weights.iter().sum();
+    ibufs.l1_weights.clear();
+    ibufs.l1_weights.extend((0..ibufs.l1_chars.len()).map(|r| 1.0 / (r + 1) as f64));
+    ibufs.l2_weights.clear();
+    ibufs.l2_weights.extend((0..ibufs.l2_chars.len()).map(|r| 1.0 / (r + 1) as f64));
+    let l1_w_sum: f64 = ibufs.l1_weights.iter().sum();
+    let l2_w_sum: f64 = ibufs.l2_weights.iter().sum();
 
     let mut sampled = 0;
     let mut tries = 0;
     while sampled < n_samples && tries < n_samples * 5 {
         tries += 1;
-        let c1 = weighted_choice(&l1_chars, &l1_weights, l1_w_sum, rng).0;
-        let c2 = weighted_choice(&l2_chars, &l2_weights, l2_w_sum, rng).0;
+        let c1 = weighted_choice(&ibufs.l1_chars, &ibufs.l1_weights, l1_w_sum, rng).0;
+        let c2 = weighted_choice(&ibufs.l2_chars, &ibufs.l2_weights, l2_w_sum, rng).0;
         if swap_would_violate(layout, c1, c2, ctx.pairs) {
             continue;
         }
