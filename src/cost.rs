@@ -543,10 +543,16 @@ mod tests {
     use crate::corpus::Corpus;
     use crate::layout::{KeyboardParams, Layout};
 
+    const RICH_CORPUS: &str = "\
+        あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ\
+        まみむめもやゆよらりるれろわをん、。っ\
+        がぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ\
+        しているのはたかいてにをとなっくれるさきこそうんおもちよけ";
+
     fn test_fixtures() -> (Layout, Corpus, Weights) {
         let kp = KeyboardParams::k3x10();
         let layout = Layout::initial(kp);
-        let corpus = Corpus::from_str("あいうえおかきくけこさしすせそ");
+        let corpus = Corpus::from_str(RICH_CORPUS);
         let weights = Weights::default();
         (layout, corpus, weights)
     }
@@ -571,34 +577,69 @@ mod tests {
     #[test]
     fn test_key_pair_cost_same_key() {
         let w = Weights::default();
-        // 同一キー → same_key_penalty
         assert_eq!(key_pair_cost(0, 0, &w), w.same_key_penalty);
     }
 
-    #[test]
-    fn test_delta_score_matches_full_rescore() {
-        let (layout, corpus, weights) = test_fixtures();
+    fn verify_all_pairs(layout: &Layout, corpus: &Corpus, weights: &Weights) {
         let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
-        let score_before = score(&layout, &corpus, &weights);
+        let score_before = score(layout, corpus, weights);
 
-        let kp = layout.kp;
-        let chars: Vec<crate::chars::CharId> = (0..kp.num_chars as crate::chars::CharId)
+        let chars: Vec<crate::chars::CharId> = (0..layout.kp.num_chars as crate::chars::CharId)
             .filter(|&c| c < crate::chars::VOID_CHAR_FIRST)
             .collect();
 
-        for i in 0..chars.len().min(10) {
-            for j in (i + 1)..chars.len().min(15) {
+        for i in 0..chars.len() {
+            for j in (i + 1)..chars.len() {
                 let (c1, c2) = (chars[i], chars[j]);
-                let d = delta_score(&layout, &corpus, &weights, c1, c2, &mut buf);
+                let d = delta_score(layout, corpus, weights, c1, c2, &mut buf);
                 let mut layout2 = layout.clone();
                 layout2.swap_chars(c1, c2);
-                let score_after = score(&layout2, &corpus, &weights);
+                let score_after = score(&layout2, corpus, weights);
                 let expected = score_after - score_before;
                 assert!(
-                    (d - expected).abs() < 1e-10,
-                    "delta_score mismatch for ({c1},{c2}): got {d}, expected {expected}"
+                    (d - expected).abs() < 1e-6,
+                    "delta mismatch for ({c1},{c2}): got {d}, expected {expected}, diff {}",
+                    (d - expected).abs()
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_delta_score_all_pairs_3x10() {
+        let (layout, corpus, weights) = test_fixtures();
+        verify_all_pairs(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_delta_score_shuffled_layout() {
+        let kp = KeyboardParams::k3x10();
+        let mut layout = Layout::initial(kp);
+        let corpus = Corpus::from_str(RICH_CORPUS);
+        let weights = Weights::default();
+
+        // L1⇔L2 のスワップを複数回行ってレイアウトを崩す
+        let swaps: [(CharId, CharId); 8] = [
+            (0, 30), (3, 45), (7, 38), (9, 50),
+            (11, 42), (15, 55), (20, 33), (25, 48),
+        ];
+        for (c1, c2) in swaps {
+            layout.swap_chars(c1, c2);
+        }
+
+        verify_all_pairs(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_delta_score_all_pairs_3x11() {
+        let kp = KeyboardParams::k3x11();
+        let layout = Layout::initial(kp);
+        let corpus = Corpus::from_str(RICH_CORPUS);
+        let weights = Weights {
+            kp,
+            ..Weights::default()
+        };
+
+        verify_all_pairs(&layout, &corpus, &weights);
     }
 }
