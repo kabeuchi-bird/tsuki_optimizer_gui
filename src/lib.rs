@@ -55,6 +55,12 @@ pub fn write_config_summary(
         search_config.tenure_grow_interval,
         search_config.tenure_max_scale
     );
+    let _ = writeln!(out, " initial_layout = {}",
+        match search_config.initial_layout_mode {
+            search::InitialLayoutMode::Tsuki2_263 => "2-263（月配列2-263ベース）",
+            search::InitialLayoutMode::Random => "random（ランダム配字）",
+        }
+    );
     let _ = writeln!(out, " stroke_scale  = {:.1}", weights.stroke_scale);
     let _ = writeln!(
         out,

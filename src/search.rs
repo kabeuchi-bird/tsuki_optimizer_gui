@@ -46,6 +46,10 @@ impl TabuList {
             return;
         }
         let key = normalize_pair(c1, c2);
+        let idx = pair_index(key.0 as usize, key.1 as usize);
+        if self.bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
+            return;
+        }
         if self.entries.len() < self.capacity {
             self.entries.push(key);
         } else {
@@ -55,7 +59,6 @@ impl TabuList {
             self.entries[self.head] = key;
             self.head = (self.head + 1) % self.capacity;
         }
-        let idx = pair_index(key.0 as usize, key.1 as usize);
         self.bitset[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
     }
 }
@@ -224,6 +227,16 @@ struct Candidate {
     delta: f64,
 }
 
+/// 初期配列の生成方式
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InitialLayoutMode {
+    /// 月配列2-263の初期配列＋頻度ソートで L1/L2 を振り分け
+    #[default]
+    Tsuki2_263,
+    /// 制約を守りつつランダムに配字
+    Random,
+}
+
 /// ——————————————————————————————
 /// タブーサーチの設定
 /// ——————————————————————————————
@@ -241,6 +254,7 @@ pub struct SearchConfig {
     pub tenure_grow_threshold: f64,
     pub tenure_grow_interval: usize,
     pub tenure_max_scale: f64,
+    pub initial_layout_mode: InitialLayoutMode,
 }
 
 impl Default for SearchConfig {
@@ -259,6 +273,7 @@ impl Default for SearchConfig {
             tenure_grow_threshold: 0.5,
             tenure_grow_interval: 200,
             tenure_max_scale: 3.0,
+            initial_layout_mode: InitialLayoutMode::default(),
         }
     }
 }
@@ -341,6 +356,7 @@ pub fn run(
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
 
@@ -381,6 +397,7 @@ pub fn run(
             config.inter_sample,
             rng,
             &mut candidates,
+            &mut inter_bufs,
             &mut delta_buf,
             &mut pair_cache,
         );
@@ -667,44 +684,70 @@ fn generate_swap_candidates(
 }
 
 /// 操作C: 層間スワップ候補を頻度差ベースサンプリングで生成
+struct InterLayerBufs {
+    l1_chars: Vec<(CharId, f64)>,
+    l2_chars: Vec<(CharId, f64)>,
+    l1_weights: Vec<f64>,
+    l2_weights: Vec<f64>,
+}
+
+impl InterLayerBufs {
+    fn new(num_chars: usize) -> Self {
+        Self {
+            l1_chars: Vec::with_capacity(num_chars),
+            l2_chars: Vec::with_capacity(num_chars),
+            l1_weights: Vec::with_capacity(num_chars),
+            l2_weights: Vec::with_capacity(num_chars),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_inter_layer_candidates(
     layout: &Layout,
     ctx: &SearchContext,
     n_samples: usize,
     rng: &mut impl Rng,
     out: &mut Vec<Candidate>,
+    ibufs: &mut InterLayerBufs,
     buf: &mut DeltaScoreBuffer,
     cache: &mut DeltaPairCache,
 ) {
     let kp = layout.kp;
 
-    let mut l1_chars: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c))
-        .map(|c| (c, ctx.corpus.unigrams[c as usize]))
-        .collect();
-    l1_chars.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    ibufs.l1_chars.clear();
+    ibufs.l1_chars.extend(
+        (0..kp.num_chars as CharId)
+            .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c))
+            .map(|c| (c, ctx.corpus.unigrams[c as usize])),
+    );
+    ibufs.l1_chars.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
-    let mut l2_chars: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
-        .filter(|&c| !layout.is_l1(c) && !is_void(c))
-        .map(|c| (c, ctx.corpus.unigrams[c as usize]))
-        .collect();
-    l2_chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    ibufs.l2_chars.clear();
+    ibufs.l2_chars.extend(
+        (0..kp.num_chars as CharId)
+            .filter(|&c| !layout.is_l1(c) && !is_void(c))
+            .map(|c| (c, ctx.corpus.unigrams[c as usize])),
+    );
+    ibufs.l2_chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    if l1_chars.is_empty() || l2_chars.is_empty() {
+    if ibufs.l1_chars.is_empty() || ibufs.l2_chars.is_empty() {
         return;
     }
 
-    let l1_weights: Vec<f64> = (0..l1_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
-    let l2_weights: Vec<f64> = (0..l2_chars.len()).map(|r| 1.0 / (r + 1) as f64).collect();
-    let l1_w_sum: f64 = l1_weights.iter().sum();
-    let l2_w_sum: f64 = l2_weights.iter().sum();
+    ibufs.l1_weights.clear();
+    ibufs.l1_weights.extend((0..ibufs.l1_chars.len()).map(|r| 1.0 / (r + 1) as f64));
+    ibufs.l2_weights.clear();
+    ibufs.l2_weights.extend((0..ibufs.l2_chars.len()).map(|r| 1.0 / (r + 1) as f64));
+    let l1_w_sum: f64 = ibufs.l1_weights.iter().sum();
+    let l2_w_sum: f64 = ibufs.l2_weights.iter().sum();
 
     let mut sampled = 0;
     let mut tries = 0;
     while sampled < n_samples && tries < n_samples * 5 {
         tries += 1;
-        let c1 = weighted_choice(&l1_chars, &l1_weights, l1_w_sum, rng).0;
-        let c2 = weighted_choice(&l2_chars, &l2_weights, l2_w_sum, rng).0;
+        let c1 = weighted_choice(&ibufs.l1_chars, &ibufs.l1_weights, l1_w_sum, rng).0;
+        let c2 = weighted_choice(&ibufs.l2_chars, &ibufs.l2_weights, l2_w_sum, rng).0;
         if swap_would_violate(layout, c1, c2, ctx.pairs) {
             continue;
         }
@@ -766,26 +809,44 @@ fn random_perturbation(
 }
 
 /// ——————————————————————————————
-/// 初期解生成：頻度上位の文字をLayer 1へ配置
+/// 初期解生成
 /// ——————————————————————————————
 pub fn build_initial_layout(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    mode: InitialLayoutMode,
+    rng: &mut impl Rng,
+    out: &mut impl Write,
+) -> Layout {
+    let layout = match mode {
+        InitialLayoutMode::Tsuki2_263 => build_initial_2_263(ctx, kp, out),
+        InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
+    };
+
+    let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
+        match mode {
+            InitialLayoutMode::Tsuki2_263 => "2-263",
+            InitialLayoutMode::Random => "ランダム",
+        },
+        {
+            use crate::chars::CHAR_LIST;
+            (0..kp.num_chars as CharId)
+                .filter(|&c| layout.is_l1(c) && !is_void(c))
+                .map(|c| CHAR_LIST[c as usize])
+                .collect::<String>()
+        },
+    );
+
+    layout
+}
+
+/// 頻度上位の文字をLayer 1へ配置（従来方式）
+fn build_initial_2_263(
     ctx: &SearchContext,
     kp: KeyboardParams,
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
-
-    // L1に確定固定される文字：
-    //   3x10: 。(KUTEN)、、(TOUTEN)、゛(DAKUTEN)、゜(HANDAKUTEN) → 4文字
-    //   3x11: ゛(DAKUTEN)、゜(HANDAKUTEN) → 2文字（。と、は自由移動可）
-    //
-    // L1キャラクタースロット数：
-    //   3x10: 30 - 0（シフトスロットなし）= 30
-    //   3x11: 33 - 2（☆★スロット）= 31
-    //
-    // L1の自由スロット数（頻度上位でうめる枠）:
-    //   3x10: 30 - 4（固定）= 26
-    //   3x11: 31 - 2（l1_only）= 29
 
     let l1_char_slots = kp.num_slots_per_layer as usize
         - if kp.size == crate::layout::KeyboardSize::K3x11 {
@@ -800,14 +861,12 @@ pub fn build_initial_layout(
     };
     let l1_free_slots = l1_char_slots - l1_fixed_count;
 
-    // 動かせる全文字を頻度降順にソート
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
         .map(|c| (c, ctx.corpus.unigrams[c as usize]))
         .collect();
     movable.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    // 頻度上位 l1_free_slots 文字をL1ターゲットとする
     let l1_targets: Vec<CharId> = movable
         .iter()
         .take(l1_free_slots)
@@ -816,7 +875,6 @@ pub fn build_initial_layout(
 
     let l1_target_set: std::collections::HashSet<CharId> = l1_targets.iter().copied().collect();
 
-    // 現在L1にいる（動かせる）文字のうち、targetに入っていないものをL2に降格
     let mut to_demote: std::collections::VecDeque<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| {
             layout.is_l1(c)
@@ -827,79 +885,112 @@ pub fn build_initial_layout(
         })
         .collect();
 
-    // L2にいてL1に昇格すべき文字のキュー
     let mut to_promote: std::collections::VecDeque<CharId> = l1_targets
         .iter()
         .copied()
         .filter(|&c| !layout.is_l1(c))
         .collect();
 
-    // ペアで層間スワップ
     while let (Some(demote), Some(promote)) = (to_demote.pop_front(), to_promote.pop_front()) {
         layout.swap_chars(demote, promote);
     }
 
-    // 排他ペア制約の初期違反を greedy 修正（L2 同士をスワップして解消）
-    if !ctx.pairs.is_empty() {
-        let npl = kp.num_slots_per_layer as usize;
-        for _pass in 0..20 {
-            let mut any_violation = false;
-            for l1_slot in 0..npl {
-                let l2_slot = l1_slot + npl;
-                let l1_c = layout.slot_to_char[l1_slot];
-                let l2_c = layout.slot_to_char[l2_slot];
-                // SHIFT_SLOT_SENTINEL(255) と void(>=62) を除外
-                if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
-                    continue;
-                }
-                if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
-                    continue;
-                }
+    fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
+    layout
+}
 
-                any_violation = true;
-                let mut fixed = false;
-                'fix: for alt_l1_slot in 0..npl {
-                    let alt_l2_slot = alt_l1_slot + npl;
-                    let alt_l2_c = layout.slot_to_char[alt_l2_slot];
-                    if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
-                        continue;
-                    }
-                    // スワップ後: l1_slot側は (l1_c, alt_l2_c)、alt_l1_slot側は (alt_l1_c, l2_c)
-                    if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
-                        continue;
-                    }
-                    let alt_l1_c = layout.slot_to_char[alt_l1_slot];
-                    if alt_l1_c != SHIFT_SLOT_SENTINEL
-                        && alt_l1_c < VOID_CHAR_FIRST
-                        && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
-                    {
-                        continue;
-                    }
-                    layout.swap_chars(l2_c, alt_l2_c);
-                    fixed = true;
-                    break 'fix;
-                }
-                if !fixed {
-                    let _ = writeln!(
-                        out,
-                        "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})",
-                        l1_slot
-                    );
-                }
-            }
-            if !any_violation {
-                break;
-            }
-        }
+/// ランダム配字：制約を守りつつ全文字をランダムにシャッフル
+fn build_initial_random(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    rng: &mut impl Rng,
+    out: &mut impl Write,
+) -> Layout {
+    let mut layout = Layout::initial(kp);
+
+    // 移動可能な文字を収集
+    let mut movable: Vec<CharId> = (0..kp.num_chars as CharId)
+        .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
+        .collect();
+
+    // Fisher-Yates シャッフル → 各文字のスロットをランダムに割り当て
+    movable.shuffle(rng);
+
+    // movable 中の現在のスロットを集め、シャッフル後の文字を順に割り当てる
+    let slots: Vec<crate::layout::SlotId> = movable
+        .iter()
+        .map(|&c| layout.char_to_slot[c as usize])
+        .collect();
+
+    // 全 movable 文字を一旦取り外してから再配置（スワップの循環依存を避けるため直接代入）
+    for &s in &slots {
+        layout.slot_to_char[s as usize] = SHIFT_SLOT_SENTINEL;
+    }
+    for (&c, &s) in movable.iter().zip(slots.iter()) {
+        layout.char_to_slot[c as usize] = s;
+        layout.slot_to_char[s as usize] = c;
     }
 
-    let _ = writeln!(out, "初期解生成完了。L1に配置: {:?}", {
-        use crate::chars::CHAR_LIST;
-        (0..kp.num_chars as CharId)
-            .filter(|&c| layout.is_l1(c) && !is_void(c))
-            .map(|c| CHAR_LIST[c as usize])
-            .collect::<String>()
-    });
-
+    fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
     layout
+}
+
+/// 排他ペア制約の初期違反を greedy 修正（L2 同士をスワップして解消）
+fn fix_exclusive_pair_violations(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    out: &mut impl Write,
+) {
+    if ctx.pairs.is_empty() {
+        return;
+    }
+    let npl = kp.num_slots_per_layer as usize;
+    for _pass in 0..20 {
+        let mut any_violation = false;
+        for l1_slot in 0..npl {
+            let l2_slot = l1_slot + npl;
+            let l1_c = layout.slot_to_char[l1_slot];
+            let l2_c = layout.slot_to_char[l2_slot];
+            if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
+                continue;
+            }
+            if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
+                continue;
+            }
+
+            any_violation = true;
+            let mut fixed = false;
+            'fix: for alt_l1_slot in 0..npl {
+                let alt_l2_slot = alt_l1_slot + npl;
+                let alt_l2_c = layout.slot_to_char[alt_l2_slot];
+                if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
+                    continue;
+                }
+                if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
+                    continue;
+                }
+                let alt_l1_c = layout.slot_to_char[alt_l1_slot];
+                if alt_l1_c != SHIFT_SLOT_SENTINEL
+                    && alt_l1_c < VOID_CHAR_FIRST
+                    && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
+                {
+                    continue;
+                }
+                layout.swap_chars(l2_c, alt_l2_c);
+                fixed = true;
+                break 'fix;
+            }
+            if !fixed {
+                let _ = writeln!(
+                    out,
+                    "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})",
+                    l1_slot
+                );
+            }
+        }
+        if !any_violation {
+            break;
+        }
+    }
 }

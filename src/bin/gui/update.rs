@@ -46,6 +46,22 @@ impl eframe::App for App {
                             "3x11",
                         );
                     });
+                ui.separator();
+                ui.label("初期配列:");
+                egui::ComboBox::from_id_salt("initial_layout")
+                    .selected_text(&self.initial_layout_str_input)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.initial_layout_str_input,
+                            "2-263".to_string(),
+                            "2-263",
+                        );
+                        ui.selectable_value(
+                            &mut self.initial_layout_str_input,
+                            "random".to_string(),
+                            "ランダム",
+                        );
+                    });
             });
 
             // 設定ファイルエラー表示

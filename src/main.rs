@@ -167,6 +167,19 @@ fn main() {
     if let Some(v) = cli.get("--stroke-scale") {
         weights.stroke_scale = parse_cli_value("--stroke-scale", v);
     }
+    if let Some(v) = cli.get("--initial-layout") {
+        search_config.initial_layout_mode = match v.as_str() {
+            "random" => search::InitialLayoutMode::Random,
+            "2-263" => search::InitialLayoutMode::Tsuki2_263,
+            other => {
+                eprintln!(
+                    "警告: 不明な --initial-layout '{}' → 2-263 を使用します",
+                    other
+                );
+                search::InitialLayoutMode::Tsuki2_263
+            }
+        };
+    }
 
     let corpus_path = toml_config.corpus_path(cli.get("--corpus").map(|s| s.as_str()));
     let seed = {
@@ -254,6 +267,7 @@ fn main() {
     );
 
     // ── 初期解生成 ───────────────────────────────
+    let mut rng = SmallRng::seed_from_u64(seed);
     let l1_only = toml_config.build_l1_only_set();
     let ctx = search::SearchContext {
         corpus: &corpus,
@@ -261,7 +275,9 @@ fn main() {
         pairs: &exclusive_pairs,
         l1_only: &l1_only,
     };
-    let initial_layout = search::build_initial_layout(&ctx, kp, &mut out);
+    let initial_layout = search::build_initial_layout(
+        &ctx, kp, search_config.initial_layout_mode, &mut rng, &mut out,
+    );
     let initial_score = score(&initial_layout, &corpus, &weights);
     tsuki_optimize::write_initial_layout(&mut out, &initial_layout, &corpus, &weights);
 
@@ -276,7 +292,6 @@ fn main() {
     }
 
     // ── タブーサーチ ─────────────────────────────
-    let mut rng = SmallRng::seed_from_u64(seed);
     let best_layout = search::run(
         initial_layout,
         &ctx,
