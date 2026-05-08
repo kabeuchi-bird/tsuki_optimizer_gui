@@ -49,7 +49,7 @@ pub struct RunConfig {
 
     /// キーボードサイズ: "3x10"（デフォルト）または "3x11"
     pub keyboard_size: Option<String>,
-    /// 初期配列モード: "hardcoded"（デフォルト）または "random"
+    /// 初期配列モード: "2-263"（デフォルト）または "random"
     pub initial_layout: Option<String>,
 }
 
@@ -133,13 +133,13 @@ impl Config {
     pub fn build_initial_layout_mode(&self) -> InitialLayoutMode {
         match self.run.initial_layout.as_deref() {
             Some("random") => InitialLayoutMode::Random,
-            Some("hardcoded") | None => InitialLayoutMode::Hardcoded,
+            Some("2-263") | None => InitialLayoutMode::Tsuki2_263,
             Some(other) => {
                 eprintln!(
-                    "警告: 不明な initial_layout '{}' → hardcoded を使用します",
+                    "警告: 不明な initial_layout '{}' → 2-263 を使用します",
                     other
                 );
-                InitialLayoutMode::Hardcoded
+                InitialLayoutMode::Tsuki2_263
             }
         }
     }

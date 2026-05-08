@@ -53,8 +53,8 @@ impl eframe::App for App {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.initial_layout_str_input,
-                            "hardcoded".to_string(),
-                            "頻度ソート",
+                            "2-263".to_string(),
+                            "2-263",
                         );
                         ui.selectable_value(
                             &mut self.initial_layout_str_input,

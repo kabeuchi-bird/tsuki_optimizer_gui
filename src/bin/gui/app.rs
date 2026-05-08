@@ -88,7 +88,7 @@ impl App {
             .run
             .initial_layout
             .as_deref()
-            .unwrap_or("hardcoded")
+            .unwrap_or("2-263")
             .to_string();
 
         App {
@@ -170,7 +170,7 @@ impl App {
 
         search_config.initial_layout_mode = match self.initial_layout_str_input.as_str() {
             "random" => search::InitialLayoutMode::Random,
-            _ => search::InitialLayoutMode::Hardcoded,
+            _ => search::InitialLayoutMode::Tsuki2_263,
         };
 
         let seed: u64 = if self.seed_str.is_empty() {

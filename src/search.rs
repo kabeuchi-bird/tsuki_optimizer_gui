@@ -230,9 +230,9 @@ struct Candidate {
 /// 初期配列の生成方式
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InitialLayoutMode {
-    /// ハードコード初期配列＋頻度ソートで L1/L2 を振り分け
+    /// 月配列2-263の初期配列＋頻度ソートで L1/L2 を振り分け
     #[default]
-    Hardcoded,
+    Tsuki2_263,
     /// 制約を守りつつランダムに配字
     Random,
 }
@@ -819,13 +819,13 @@ pub fn build_initial_layout(
     out: &mut impl Write,
 ) -> Layout {
     let layout = match mode {
-        InitialLayoutMode::Hardcoded => build_initial_hardcoded(ctx, kp, out),
+        InitialLayoutMode::Tsuki2_263 => build_initial_2_263(ctx, kp, out),
         InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
     };
 
     let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
         match mode {
-            InitialLayoutMode::Hardcoded => "頻度ソート",
+            InitialLayoutMode::Tsuki2_263 => "2-263",
             InitialLayoutMode::Random => "ランダム",
         },
         {
@@ -841,7 +841,7 @@ pub fn build_initial_layout(
 }
 
 /// 頻度上位の文字をLayer 1へ配置（従来方式）
-fn build_initial_hardcoded(
+fn build_initial_2_263(
     ctx: &SearchContext,
     kp: KeyboardParams,
     out: &mut impl Write,

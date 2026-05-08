@@ -57,7 +57,7 @@ pub fn write_config_summary(
     );
     let _ = writeln!(out, " initial_layout = {}",
         match search_config.initial_layout_mode {
-            search::InitialLayoutMode::Hardcoded => "hardcoded（頻度ソート）",
+            search::InitialLayoutMode::Tsuki2_263 => "2-263（月配列2-263ベース）",
             search::InitialLayoutMode::Random => "random（ランダム配字）",
         }
     );

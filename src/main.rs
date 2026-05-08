@@ -170,13 +170,13 @@ fn main() {
     if let Some(v) = cli.get("--initial-layout") {
         search_config.initial_layout_mode = match v.as_str() {
             "random" => search::InitialLayoutMode::Random,
-            "hardcoded" => search::InitialLayoutMode::Hardcoded,
+            "2-263" => search::InitialLayoutMode::Tsuki2_263,
             other => {
                 eprintln!(
-                    "警告: 不明な --initial-layout '{}' → hardcoded を使用します",
+                    "警告: 不明な --initial-layout '{}' → 2-263 を使用します",
                     other
                 );
-                search::InitialLayoutMode::Hardcoded
+                search::InitialLayoutMode::Tsuki2_263
             }
         };
     }

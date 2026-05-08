@@ -121,7 +121,7 @@ GUI では以下の機能が利用できます:
 | `--stroke-scale` | `<実数>` | 10.0 | `weights.stroke_scale` | 打鍵数スケール係数 |
 | `--log-interval` | `<整数>` | 1000 | `run.log_interval` | ログ出力間隔（0で無効） |
 | `--keyboard-size` | `3x10` / `3x11` | `3x10` | `run.keyboard_size` | キーボードサイズ |
-| `--initial-layout` | `hardcoded` / `random` | `hardcoded` | `run.initial_layout` | 初期配列モード |
+| `--initial-layout` | `2-263` / `random` | `2-263` | `run.initial_layout` | 初期配列モード |
 | `--log` | `<path>` | `log/YYMMDD_HHMMSS.log` | — | ログファイルのパス |
 
 ### 実行中の操作（CLI、Unix のみ）
