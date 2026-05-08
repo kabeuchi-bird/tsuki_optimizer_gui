@@ -168,17 +168,7 @@ fn main() {
         weights.stroke_scale = parse_cli_value("--stroke-scale", v);
     }
     if let Some(v) = cli.get("--initial-layout") {
-        search_config.initial_layout_mode = match v.as_str() {
-            "random" => search::InitialLayoutMode::Random,
-            "2-263" => search::InitialLayoutMode::Tsuki2_263,
-            other => {
-                eprintln!(
-                    "警告: 不明な --initial-layout '{}' → 2-263 を使用します",
-                    other
-                );
-                search::InitialLayoutMode::Tsuki2_263
-            }
-        };
+        search_config.initial_layout_mode = search::InitialLayoutMode::from_config_str(v);
     }
 
     let corpus_path = toml_config.corpus_path(cli.get("--corpus").map(|s| s.as_str()));

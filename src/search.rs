@@ -37,8 +37,7 @@ impl TabuList {
     #[inline]
     fn contains(&self, c1: CharId, c2: CharId) -> bool {
         let (a, b) = normalize_pair(c1, c2);
-        let idx = pair_index(a as usize, b as usize);
-        self.bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0
+        bitset_test(&self.bitset, pair_index(a as usize, b as usize))
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
@@ -47,19 +46,18 @@ impl TabuList {
         }
         let key = normalize_pair(c1, c2);
         let idx = pair_index(key.0 as usize, key.1 as usize);
-        if self.bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
+        if bitset_test(&self.bitset, idx) {
             return;
         }
         if self.entries.len() < self.capacity {
             self.entries.push(key);
         } else {
             let old = self.entries[self.head];
-            let old_idx = pair_index(old.0 as usize, old.1 as usize);
-            self.bitset[old_idx / BITS_PER_WORD] &= !(1u64 << (old_idx % BITS_PER_WORD));
+            bitset_clear(&mut self.bitset, pair_index(old.0 as usize, old.1 as usize));
             self.entries[self.head] = key;
             self.head = (self.head + 1) % self.capacity;
         }
-        self.bitset[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
+        bitset_set(&mut self.bitset, idx);
     }
 }
 
@@ -77,10 +75,28 @@ const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
 const BITS_PER_WORD: usize = u64::BITS as usize;
 const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
+// dirty mask が u64 に収まることの静的検証
+const _: () = assert!(MAX_CHARS <= 64, "MAX_CHARS must be <= 64 for u64 dirty mask");
+
 #[inline]
 fn pair_index(a: usize, b: usize) -> usize {
     debug_assert!(a < b && b < MAX_CHARS);
     a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+}
+
+#[inline]
+fn bitset_test(bitset: &[u64; VALID_WORDS], idx: usize) -> bool {
+    bitset[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0
+}
+
+#[inline]
+fn bitset_set(bitset: &mut [u64; VALID_WORDS], idx: usize) {
+    bitset[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
+}
+
+#[inline]
+fn bitset_clear(bitset: &mut [u64; VALID_WORDS], idx: usize) {
+    bitset[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
 }
 
 /// ——————————————————————————————
@@ -105,7 +121,7 @@ impl DeltaPairCache {
     #[inline]
     fn get(&self, a: usize, b: usize) -> Option<f64> {
         let idx = pair_index(a, b);
-        if self.valid[idx / BITS_PER_WORD] & (1u64 << (idx % BITS_PER_WORD)) != 0 {
+        if bitset_test(&self.valid, idx) {
             Some(self.values[idx])
         } else {
             None
@@ -116,7 +132,7 @@ impl DeltaPairCache {
     fn set(&mut self, a: usize, b: usize, value: f64) {
         let idx = pair_index(a, b);
         self.values[idx] = value;
-        self.valid[idx / BITS_PER_WORD] |= 1u64 << (idx % BITS_PER_WORD);
+        bitset_set(&mut self.valid, idx);
     }
 
     #[inline]
@@ -144,12 +160,10 @@ impl DeltaPairCache {
             let c = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             for other in 0..c {
-                let idx = pair_index(other, c);
-                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
+                bitset_clear(&mut self.valid, pair_index(other, c));
             }
             for other in (c + 1)..MAX_CHARS {
-                let idx = pair_index(c, other);
-                self.valid[idx / BITS_PER_WORD] &= !(1u64 << (idx % BITS_PER_WORD));
+                bitset_clear(&mut self.valid, pair_index(c, other));
             }
         }
     }
@@ -235,6 +249,33 @@ pub enum InitialLayoutMode {
     Tsuki2_263,
     /// 制約を守りつつランダムに配字
     Random,
+}
+
+impl InitialLayoutMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tsuki2_263 => "2-263",
+            Self::Random => "ランダム",
+        }
+    }
+
+    pub fn config_label(self) -> &'static str {
+        match self {
+            Self::Tsuki2_263 => "2-263（月配列2-263ベース）",
+            Self::Random => "random（ランダム配字）",
+        }
+    }
+
+    pub fn from_config_str(s: &str) -> Self {
+        match s {
+            "random" => Self::Random,
+            "2-263" => Self::Tsuki2_263,
+            _ => {
+                eprintln!("警告: 不明な initial_layout '{}' → 2-263 を使用します", s);
+                Self::Tsuki2_263
+            }
+        }
+    }
 }
 
 /// ——————————————————————————————
@@ -824,10 +865,7 @@ pub fn build_initial_layout(
     };
 
     let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
-        match mode {
-            InitialLayoutMode::Tsuki2_263 => "2-263",
-            InitialLayoutMode::Random => "ランダム",
-        },
+        mode.label(),
         {
             use crate::chars::CHAR_LIST;
             (0..kp.num_chars as CharId)

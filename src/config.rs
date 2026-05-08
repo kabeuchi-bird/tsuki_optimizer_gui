@@ -129,18 +129,10 @@ impl Config {
         }
     }
 
-    /// initial_layout 設定から InitialLayoutMode を生成する
     pub fn build_initial_layout_mode(&self) -> InitialLayoutMode {
         match self.run.initial_layout.as_deref() {
-            Some("random") => InitialLayoutMode::Random,
-            Some("2-263") | None => InitialLayoutMode::Tsuki2_263,
-            Some(other) => {
-                eprintln!(
-                    "警告: 不明な initial_layout '{}' → 2-263 を使用します",
-                    other
-                );
-                InitialLayoutMode::Tsuki2_263
-            }
+            Some(s) => InitialLayoutMode::from_config_str(s),
+            None => InitialLayoutMode::default(),
         }
     }
 
