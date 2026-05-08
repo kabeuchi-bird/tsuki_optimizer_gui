@@ -23,6 +23,7 @@ pub struct App {
     pub restart_str: String,
     pub corpus_path_str: String,
     pub keyboard_size_str_input: String,
+    pub initial_layout_str_input: String,
 
     // 探索スレッド制御
     pub stop_flag: Arc<AtomicBool>,
@@ -83,6 +84,12 @@ impl App {
             .as_deref()
             .unwrap_or("3x10")
             .to_string();
+        let initial_layout = toml_config
+            .run
+            .initial_layout
+            .as_deref()
+            .unwrap_or("hardcoded")
+            .to_string();
 
         App {
             seed_str: String::new(),
@@ -90,6 +97,7 @@ impl App {
             restart_str: search_config.restart_after.to_string(),
             corpus_path_str: corpus_path,
             keyboard_size_str_input: keyboard_size,
+            initial_layout_str_input: initial_layout,
             stop_flag: Arc::new(AtomicBool::new(false)),
             rx: None,
             running: false,
@@ -159,6 +167,11 @@ impl App {
                 }
             }
         }
+
+        search_config.initial_layout_mode = match self.initial_layout_str_input.as_str() {
+            "random" => search::InitialLayoutMode::Random,
+            _ => search::InitialLayoutMode::Hardcoded,
+        };
 
         let seed: u64 = if self.seed_str.is_empty() {
             rand::random()
@@ -283,7 +296,9 @@ impl App {
                 &exclusive_pairs,
             );
 
-            let initial = search::build_initial_layout(&ctx, kp, &mut log_writer);
+            let initial = search::build_initial_layout(
+                &ctx, kp, search_config.initial_layout_mode, &mut rng, &mut log_writer,
+            );
             let initial_score = score(&initial, &corpus, &weights);
             tsuki_optimize::write_initial_layout(&mut log_writer, &initial, &corpus, &weights);
 

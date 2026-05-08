@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::chars::{self, CharId, MAX_CHARS};
 use crate::cost::Weights;
 use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
-use crate::search::SearchConfig;
+use crate::search::{InitialLayoutMode, SearchConfig};
 
 // ──────────────────────────────────────
 // TOMLファイルのトップレベル構造
@@ -49,6 +49,8 @@ pub struct RunConfig {
 
     /// キーボードサイズ: "3x10"（デフォルト）または "3x11"
     pub keyboard_size: Option<String>,
+    /// 初期配列モード: "hardcoded"（デフォルト）または "random"
+    pub initial_layout: Option<String>,
 }
 
 // ──────────────────────────────────────
@@ -123,6 +125,22 @@ impl Config {
             tenure_grow_threshold: r.tenure_grow_threshold.unwrap_or(d.tenure_grow_threshold),
             tenure_grow_interval: r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
             tenure_max_scale: r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
+            initial_layout_mode: self.build_initial_layout_mode(),
+        }
+    }
+
+    /// initial_layout 設定から InitialLayoutMode を生成する
+    pub fn build_initial_layout_mode(&self) -> InitialLayoutMode {
+        match self.run.initial_layout.as_deref() {
+            Some("random") => InitialLayoutMode::Random,
+            Some("hardcoded") | None => InitialLayoutMode::Hardcoded,
+            Some(other) => {
+                eprintln!(
+                    "警告: 不明な initial_layout '{}' → hardcoded を使用します",
+                    other
+                );
+                InitialLayoutMode::Hardcoded
+            }
         }
     }
 

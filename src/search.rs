@@ -227,6 +227,16 @@ struct Candidate {
     delta: f64,
 }
 
+/// 初期配列の生成方式
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InitialLayoutMode {
+    /// ハードコード初期配列＋頻度ソートで L1/L2 を振り分け
+    #[default]
+    Hardcoded,
+    /// 制約を守りつつランダムに配字
+    Random,
+}
+
 /// ——————————————————————————————
 /// タブーサーチの設定
 /// ——————————————————————————————
@@ -244,6 +254,7 @@ pub struct SearchConfig {
     pub tenure_grow_threshold: f64,
     pub tenure_grow_interval: usize,
     pub tenure_max_scale: f64,
+    pub initial_layout_mode: InitialLayoutMode,
 }
 
 impl Default for SearchConfig {
@@ -262,6 +273,7 @@ impl Default for SearchConfig {
             tenure_grow_threshold: 0.5,
             tenure_grow_interval: 200,
             tenure_max_scale: 3.0,
+            initial_layout_mode: InitialLayoutMode::default(),
         }
     }
 }
@@ -797,26 +809,44 @@ fn random_perturbation(
 }
 
 /// ——————————————————————————————
-/// 初期解生成：頻度上位の文字をLayer 1へ配置
+/// 初期解生成
 /// ——————————————————————————————
 pub fn build_initial_layout(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    mode: InitialLayoutMode,
+    rng: &mut impl Rng,
+    out: &mut impl Write,
+) -> Layout {
+    let layout = match mode {
+        InitialLayoutMode::Hardcoded => build_initial_hardcoded(ctx, kp, out),
+        InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
+    };
+
+    let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
+        match mode {
+            InitialLayoutMode::Hardcoded => "頻度ソート",
+            InitialLayoutMode::Random => "ランダム",
+        },
+        {
+            use crate::chars::CHAR_LIST;
+            (0..kp.num_chars as CharId)
+                .filter(|&c| layout.is_l1(c) && !is_void(c))
+                .map(|c| CHAR_LIST[c as usize])
+                .collect::<String>()
+        },
+    );
+
+    layout
+}
+
+/// 頻度上位の文字をLayer 1へ配置（従来方式）
+fn build_initial_hardcoded(
     ctx: &SearchContext,
     kp: KeyboardParams,
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
-
-    // L1に確定固定される文字：
-    //   3x10: 。(KUTEN)、、(TOUTEN)、゛(DAKUTEN)、゜(HANDAKUTEN) → 4文字
-    //   3x11: ゛(DAKUTEN)、゜(HANDAKUTEN) → 2文字（。と、は自由移動可）
-    //
-    // L1キャラクタースロット数：
-    //   3x10: 30 - 0（シフトスロットなし）= 30
-    //   3x11: 33 - 2（☆★スロット）= 31
-    //
-    // L1の自由スロット数（頻度上位でうめる枠）:
-    //   3x10: 30 - 4（固定）= 26
-    //   3x11: 31 - 2（l1_only）= 29
 
     let l1_char_slots = kp.num_slots_per_layer as usize
         - if kp.size == crate::layout::KeyboardSize::K3x11 {
@@ -831,14 +861,12 @@ pub fn build_initial_layout(
     };
     let l1_free_slots = l1_char_slots - l1_fixed_count;
 
-    // 動かせる全文字を頻度降順にソート
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
         .map(|c| (c, ctx.corpus.unigrams[c as usize]))
         .collect();
     movable.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    // 頻度上位 l1_free_slots 文字をL1ターゲットとする
     let l1_targets: Vec<CharId> = movable
         .iter()
         .take(l1_free_slots)
@@ -847,7 +875,6 @@ pub fn build_initial_layout(
 
     let l1_target_set: std::collections::HashSet<CharId> = l1_targets.iter().copied().collect();
 
-    // 現在L1にいる（動かせる）文字のうち、targetに入っていないものをL2に降格
     let mut to_demote: std::collections::VecDeque<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| {
             layout.is_l1(c)
@@ -858,79 +885,112 @@ pub fn build_initial_layout(
         })
         .collect();
 
-    // L2にいてL1に昇格すべき文字のキュー
     let mut to_promote: std::collections::VecDeque<CharId> = l1_targets
         .iter()
         .copied()
         .filter(|&c| !layout.is_l1(c))
         .collect();
 
-    // ペアで層間スワップ
     while let (Some(demote), Some(promote)) = (to_demote.pop_front(), to_promote.pop_front()) {
         layout.swap_chars(demote, promote);
     }
 
-    // 排他ペア制約の初期違反を greedy 修正（L2 同士をスワップして解消）
-    if !ctx.pairs.is_empty() {
-        let npl = kp.num_slots_per_layer as usize;
-        for _pass in 0..20 {
-            let mut any_violation = false;
-            for l1_slot in 0..npl {
-                let l2_slot = l1_slot + npl;
-                let l1_c = layout.slot_to_char[l1_slot];
-                let l2_c = layout.slot_to_char[l2_slot];
-                // SHIFT_SLOT_SENTINEL(255) と void(>=62) を除外
-                if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
-                    continue;
-                }
-                if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
-                    continue;
-                }
+    fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
+    layout
+}
 
-                any_violation = true;
-                let mut fixed = false;
-                'fix: for alt_l1_slot in 0..npl {
-                    let alt_l2_slot = alt_l1_slot + npl;
-                    let alt_l2_c = layout.slot_to_char[alt_l2_slot];
-                    if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
-                        continue;
-                    }
-                    // スワップ後: l1_slot側は (l1_c, alt_l2_c)、alt_l1_slot側は (alt_l1_c, l2_c)
-                    if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
-                        continue;
-                    }
-                    let alt_l1_c = layout.slot_to_char[alt_l1_slot];
-                    if alt_l1_c != SHIFT_SLOT_SENTINEL
-                        && alt_l1_c < VOID_CHAR_FIRST
-                        && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
-                    {
-                        continue;
-                    }
-                    layout.swap_chars(l2_c, alt_l2_c);
-                    fixed = true;
-                    break 'fix;
-                }
-                if !fixed {
-                    let _ = writeln!(
-                        out,
-                        "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})",
-                        l1_slot
-                    );
-                }
-            }
-            if !any_violation {
-                break;
-            }
-        }
+/// ランダム配字：制約を守りつつ全文字をランダムにシャッフル
+fn build_initial_random(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    rng: &mut impl Rng,
+    out: &mut impl Write,
+) -> Layout {
+    let mut layout = Layout::initial(kp);
+
+    // 移動可能な文字を収集
+    let mut movable: Vec<CharId> = (0..kp.num_chars as CharId)
+        .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
+        .collect();
+
+    // Fisher-Yates シャッフル → 各文字のスロットをランダムに割り当て
+    movable.shuffle(rng);
+
+    // movable 中の現在のスロットを集め、シャッフル後の文字を順に割り当てる
+    let slots: Vec<crate::layout::SlotId> = movable
+        .iter()
+        .map(|&c| layout.char_to_slot[c as usize])
+        .collect();
+
+    // 全 movable 文字を一旦取り外してから再配置（スワップの循環依存を避けるため直接代入）
+    for &s in &slots {
+        layout.slot_to_char[s as usize] = SHIFT_SLOT_SENTINEL;
+    }
+    for (&c, &s) in movable.iter().zip(slots.iter()) {
+        layout.char_to_slot[c as usize] = s;
+        layout.slot_to_char[s as usize] = c;
     }
 
-    let _ = writeln!(out, "初期解生成完了。L1に配置: {:?}", {
-        use crate::chars::CHAR_LIST;
-        (0..kp.num_chars as CharId)
-            .filter(|&c| layout.is_l1(c) && !is_void(c))
-            .map(|c| CHAR_LIST[c as usize])
-            .collect::<String>()
-    });
-
+    fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
     layout
+}
+
+/// 排他ペア制約の初期違反を greedy 修正（L2 同士をスワップして解消）
+fn fix_exclusive_pair_violations(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    out: &mut impl Write,
+) {
+    if ctx.pairs.is_empty() {
+        return;
+    }
+    let npl = kp.num_slots_per_layer as usize;
+    for _pass in 0..20 {
+        let mut any_violation = false;
+        for l1_slot in 0..npl {
+            let l2_slot = l1_slot + npl;
+            let l1_c = layout.slot_to_char[l1_slot];
+            let l2_c = layout.slot_to_char[l2_slot];
+            if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
+                continue;
+            }
+            if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
+                continue;
+            }
+
+            any_violation = true;
+            let mut fixed = false;
+            'fix: for alt_l1_slot in 0..npl {
+                let alt_l2_slot = alt_l1_slot + npl;
+                let alt_l2_c = layout.slot_to_char[alt_l2_slot];
+                if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
+                    continue;
+                }
+                if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
+                    continue;
+                }
+                let alt_l1_c = layout.slot_to_char[alt_l1_slot];
+                if alt_l1_c != SHIFT_SLOT_SENTINEL
+                    && alt_l1_c < VOID_CHAR_FIRST
+                    && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
+                {
+                    continue;
+                }
+                layout.swap_chars(l2_c, alt_l2_c);
+                fixed = true;
+                break 'fix;
+            }
+            if !fixed {
+                let _ = writeln!(
+                    out,
+                    "警告: 排他ペア制約の初期違反を修正できませんでした (L1スロット{})",
+                    l1_slot
+                );
+            }
+        }
+        if !any_violation {
+            break;
+        }
+    }
 }
