@@ -168,10 +168,8 @@ impl App {
             }
         }
 
-        search_config.initial_layout_mode = match self.initial_layout_str_input.as_str() {
-            "random" => search::InitialLayoutMode::Random,
-            _ => search::InitialLayoutMode::Tsuki2_263,
-        };
+        search_config.initial_layout_mode =
+            search::InitialLayoutMode::from_config_str(&self.initial_layout_str_input);
 
         let seed: u64 = if self.seed_str.is_empty() {
             rand::random()
