@@ -201,7 +201,7 @@ pub struct ExclusivePairConfig {
 }
 
 // 濁音になりうる音すべて ＋ 濁点
-const DAKUON_BASE: &str = "うかきくけこさしすせそたちつてとはひふへほ゛";
+const DAKUON_BASE: &str = "うかきくけこさしすせそたちつてとはひふへほ゛、";
 // イ段のみ（きしちひ）
 const DAKUON_I_ROW: &str = "きしちひ";
 
