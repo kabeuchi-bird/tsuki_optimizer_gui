@@ -946,21 +946,19 @@ fn build_initial_random(
 ) -> Layout {
     let mut layout = Layout::initial(kp);
 
-    // 移動可能な文字を収集
-    let mut movable: Vec<CharId> = (0..kp.num_chars as CharId)
+    let movable: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
         .collect();
 
-    // Fisher-Yates シャッフル → 各文字のスロットをランダムに割り当て
-    movable.shuffle(rng);
-
-    // movable 中の現在のスロットを集め、シャッフル後の文字を順に割り当てる
-    let slots: Vec<crate::layout::SlotId> = movable
+    // シャッフル前のスロットを記録
+    let mut slots: Vec<crate::layout::SlotId> = movable
         .iter()
         .map(|&c| layout.char_to_slot[c as usize])
         .collect();
 
-    // 全 movable 文字を一旦取り外してから再配置（スワップの循環依存を避けるため直接代入）
+    // スロット列をシャッフルし、文字に再割り当て
+    slots.shuffle(rng);
+
     for &s in &slots {
         layout.slot_to_char[s as usize] = SHIFT_SLOT_SENTINEL;
     }
