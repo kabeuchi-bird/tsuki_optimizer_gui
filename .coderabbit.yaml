@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: ja-JP
+
+reviews:
+  # PRの要約を自動生成
+  auto_review:
+    enabled: true
+    # ドラフトPRはレビューしない
+    drafts: false
+    # 設定ファイルのみの変更はスキップ
+    base_branches:
+      - main
+
+  # パス別レビュー設定
+  path_instructions:
+    - path: "src/search.rs"
+      instructions: |
+        タブーサーチの探索ループです。パフォーマンスが最重要です。
+        - ループ内のヒープアロケーション（Vec::new, collect, format! 等）を指摘してください
+        - u64 ビットマスク演算の正しさを確認してください（MAX_CHARS=64 前提）
+        - DeltaPairCache の無効化漏れ（dirty mask の計算ミス）がないか確認してください
+    - path: "src/cost.rs"
+      instructions: |
+        スコアリング関数です。数値精度と delta_score の正確性が重要です。
+        - score() と delta_score() の整合性（全ペアで score差 ≈ delta 値）を壊す変更がないか確認してください
+        - slot_difficulty, stroke_scale 等の重みの適用漏れがないか確認してください
+    - path: "src/layout.rs"
+      instructions: |
+        レイアウト表現とスロット計算です。
+        - char_to_slot / slot_to_char の双方向整合性が崩れる変更がないか確認してください
+        - 3x10 / 3x11 両モードで正しく動作するか確認してください
+    - path: "src/config.rs"
+      instructions: |
+        TOML設定の読み込みです。
+        - serde(deny_unknown_fields) が付いているため、フィールド追加時にTOMLとの整合を確認してください
+        - デフォルト値の妥当性を確認してください
+    - path: "src/corpus.rs"
+      instructions: |
+        コーパス解析です。頻度の正規化（合計≈1.0）と隣接リストの整合性が重要です。
+    - path: "src/bin/gui/**"
+      instructions: |
+        eframe/egui ベースのGUIです。
+        - 探索スレッドとのチャネル通信でパニックやデッドロックが起きないか確認してください
+        - UI状態と探索パラメータの同期ミスがないか確認してください
+
+  # レビューの方針
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  sequence_diagrams: false
+
+  tools:
+    clippy:
+      enabled: true
+
+chat:
+  auto_reply: true
