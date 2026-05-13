@@ -46,7 +46,7 @@ reviews:
   # レビューの方針
   request_changes_workflow: false
   high_level_summary: true
-  poem: false
+  poem: true
   collapse_walkthrough: true
   sequence_diagrams: false
 
