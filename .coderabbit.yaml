@@ -7,7 +7,7 @@ reviews:
     enabled: true
     # ドラフトPRはレビューしない
     drafts: false
-    # 設定ファイルのみの変更はスキップ
+    # レビュー対象のベースブランチを指定
     base_branches:
       - main
 
