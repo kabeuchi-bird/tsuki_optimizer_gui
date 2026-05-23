@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::chars::{CharId, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
+use crate::chars::{CharId, CHAR_LIST, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
 use crate::layout::{
     col_to_finger, keystrokes_for_slot, slot_after_swap, slot_col, slot_hand, slot_row, Hand,
@@ -506,6 +506,96 @@ pub fn lookup_bigram_freq(corpus: &Corpus, c1: CharId, c2: CharId) -> f64 {
         }
     }
     0.0
+}
+
+/// 頻出バイグラム Top 10 の指負荷を表示
+pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut impl Write) {
+    const TOP_N: usize = 10;
+    const FINGER_NAMES: [&str; 8] = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
+
+    fn format_keystrokes(slot: SlotId, kp: KeyboardParams) -> String {
+        let ks = keystrokes_for_slot(slot, kp);
+        let keys = ks.as_slice();
+        let fingers: Vec<&str> = keys
+            .iter()
+            .map(|&s| FINGER_NAMES[col_to_finger(slot_col(s, kp.num_cols)) as usize])
+            .collect();
+        if fingers.len() == 1 {
+            format!("[{}]", fingers[0])
+        } else {
+            format!("[{}·{}]", fingers[0], fingers[1])
+        }
+    }
+
+    fn classify_transition(k1: SlotId, k2: SlotId, w: &Weights) -> &'static str {
+        let nc = w.kp.num_cols;
+        if k1 == k2 {
+            return "同キー";
+        }
+        let f1 = col_to_finger(slot_col(k1, nc));
+        let f2 = col_to_finger(slot_col(k2, nc));
+        if f1 == f2 {
+            return "同指";
+        }
+        let h1 = slot_hand(k1, nc);
+        let h2 = slot_hand(k2, nc);
+        if h1 != h2 {
+            return "交互";
+        }
+        let c1 = slot_col(k1, nc);
+        let c2 = slot_col(k2, nc);
+        let is_outroll = match h1 {
+            Hand::Left => c2 < c1,
+            Hand::Right => c2 > c1,
+        };
+        if is_outroll { "OUT" } else { "IN" }
+    }
+
+    let mut indices: Vec<usize> = (0..corpus.bigrams.len()).collect();
+    indices.sort_unstable_by(|&a, &b| {
+        corpus.bigrams[b]
+            .freq
+            .partial_cmp(&corpus.bigrams[a].freq)
+            .unwrap()
+    });
+    indices.truncate(TOP_N);
+
+    let _ = writeln!(out, "\n【頻出バイグラム Top {}】", TOP_N);
+
+    for (rank, &idx) in indices.iter().enumerate() {
+        let bg = &corpus.bigrams[idx];
+        let c1 = bg.c1;
+        let c2 = bg.c2;
+        let slot1 = layout.char_to_slot[c1 as usize];
+        let slot2 = layout.char_to_slot[c2 as usize];
+
+        let ch1 = CHAR_LIST[c1 as usize];
+        let ch2 = CHAR_LIST[c2 as usize];
+
+        let ks1 = keystrokes_for_slot(slot1, w.kp);
+        let ks2 = keystrokes_for_slot(slot2, w.kp);
+
+        let transition_type = classify_transition(ks1.last(), ks2.first(), w);
+        let cost = bigram_inter_cost(c1, c2, slot1, slot2, w);
+
+        let keystrokes_str = format!(
+            "{}→{}",
+            format_keystrokes(slot1, w.kp),
+            format_keystrokes(slot2, w.kp)
+        );
+
+        let _ = writeln!(
+            out,
+            "{:>2} {}→{}  {:>5.2}%  {:<28} {:<6} {:>6.2}",
+            rank + 1,
+            ch1,
+            ch2,
+            bg.freq * 100.0,
+            keystrokes_str,
+            transition_type,
+            cost,
+        );
+    }
 }
 
 /// プリセット有効時にシフト打鍵が省略される頻度をシフトキー別に返す

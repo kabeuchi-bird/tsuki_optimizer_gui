@@ -129,6 +129,7 @@ pub fn write_initial_layout(
     let _ = writeln!(out, "【初期解】");
     layout.display(out);
     cost::score_breakdown(layout, corpus, weights, out);
+    cost::write_top_bigrams(layout, corpus, weights, out);
 }
 
 /// 最終結果を出力する（CLI / GUI 共通）
@@ -142,6 +143,7 @@ pub fn write_final_result(
     let _ = writeln!(out, "\n【最適化結果】");
     best_layout.display(out);
     cost::score_breakdown(best_layout, corpus, weights, out);
+    cost::write_top_bigrams(best_layout, corpus, weights, out);
     let best_score = cost::score(best_layout, corpus, weights);
     let _ = writeln!(out, "\n初期スコア : {:.4}", initial_score);
     let _ = writeln!(out, "最良スコア : {:.4}", best_score);
