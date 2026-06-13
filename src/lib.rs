@@ -78,6 +78,7 @@ pub fn write_config_summary(
         weights.outroll_bonus_3gram,
         weights.inroll_bonus_3gram,
     );
+    let _ = writeln!(out, " allow_index_roll = {}", weights.allow_index_roll);
     if let Some(p) = &toml_config.constraints.preset {
         let _ = writeln!(out, " constraints.preset = {}", p);
     }

@@ -49,6 +49,10 @@ pub struct Weights {
     /// トライグラム: アルペジオ・インロール（同手3連続かつ人差し指方向に列単調）ボーナス
     pub inroll_bonus_3gram: f64,
 
+    /// 人差し指2列間（左: col3↔col4、右: col5↔col6）の遷移を同指ペナルティではなく
+    /// インロール/アウトロールとして評価するか（デフォルト: false）
+    pub allow_index_roll: bool,
+
     /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
     /// （デフォルトはすべて false = 削減なし）
     pub daku_l2_trigger: [bool; MAX_CHARS],
@@ -83,6 +87,7 @@ impl Default for Weights {
             quasi_alt_bonus: 0.1,
             outroll_bonus_3gram: 0.3,
             inroll_bonus_3gram: 0.1,
+            allow_index_roll: false,
             daku_l2_trigger: [false; MAX_CHARS],
             handaku_l2_trigger: [false; MAX_CHARS],
         }
@@ -101,6 +106,27 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
     let f1 = col_to_finger(slot_col(k1, nc));
     let f2 = col_to_finger(slot_col(k2, nc));
     if f1 == f2 {
+        // allow_index_roll が有効なとき、人差し指の2列間遷移（左: col3↔col4, 右: col5↔col6）を
+        // 同指ペナルティではなくロールとして評価する
+        if w.allow_index_roll {
+            let c1 = slot_col(k1, nc);
+            let c2 = slot_col(k2, nc);
+            if matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
+                let h1 = slot_hand(k1, nc);
+                let mut cost = w.same_hand_base;
+                let r1 = slot_row(k1, nc);
+                let r2 = slot_row(k2, nc);
+                if (r1 as i8 - r2 as i8).abs() == 2 {
+                    cost += w.upper_lower_jump;
+                }
+                let is_outroll = match h1 {
+                    Hand::Left => c2 < c1,   // col4→col3: 小指方向 = アウトロール
+                    Hand::Right => c2 > c1,  // col5→col6: 小指方向 = アウトロール
+                };
+                cost -= if is_outroll { w.outroll_bonus_2gram } else { w.inroll_bonus_2gram };
+                return cost;
+            }
+        }
         return w.same_finger_penalty;
     }
     let h1 = slot_hand(k1, nc);

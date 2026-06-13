@@ -70,6 +70,7 @@ pub struct WeightsConfig {
     pub quasi_alt_bonus: Option<f64>,
     pub outroll_bonus_3gram: Option<f64>,
     pub inroll_bonus_3gram: Option<f64>,
+    pub allow_index_roll: Option<bool>,
 }
 
 // ──────────────────────────────────────
@@ -158,6 +159,7 @@ impl Config {
             quasi_alt_bonus: w.quasi_alt_bonus.unwrap_or(d.quasi_alt_bonus),
             outroll_bonus_3gram: w.outroll_bonus_3gram.unwrap_or(d.outroll_bonus_3gram),
             inroll_bonus_3gram: w.inroll_bonus_3gram.unwrap_or(d.inroll_bonus_3gram),
+            allow_index_roll: w.allow_index_roll.unwrap_or(d.allow_index_roll),
             slot_difficulty: [
                 parse_difficulty_row(s.row0.as_deref(), d.slot_difficulty[0]),
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),
