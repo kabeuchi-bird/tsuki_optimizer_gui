@@ -70,12 +70,13 @@ pub fn write_config_summary(
     );
     let _ = writeln!(
         out,
-        " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}  arpeggio={:.2}",
+        " bonuses        alt={:.2}  outroll_2g={:.2}  inroll_2g={:.2}  quasi_alt={:.2}  outroll_3g={:.2}  inroll_3g={:.2}",
         weights.alternation_bonus,
-        weights.outroll_bonus,
-        weights.inroll_bonus,
+        weights.outroll_bonus_2gram,
+        weights.inroll_bonus_2gram,
         weights.quasi_alt_bonus,
-        weights.arpeggio_bonus,
+        weights.outroll_bonus_3gram,
+        weights.inroll_bonus_3gram,
     );
     if let Some(p) = &toml_config.constraints.preset {
         let _ = writeln!(out, " constraints.preset = {}", p);

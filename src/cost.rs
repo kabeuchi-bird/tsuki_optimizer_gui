@@ -35,16 +35,19 @@ pub struct Weights {
 
     /// 左右交互打鍵ボーナス（差し引く値）
     pub alternation_bonus: f64,
-    /// アウトロール（小指方向）ボーナス
-    pub outroll_bonus: f64,
-    /// インロール（人差し指方向）ボーナス
-    pub inroll_bonus: f64,
+    /// バイグラム: アウトロール（小指方向）ボーナス
+    /// 左手: 列番号減少方向、右手: 列番号増加方向
+    pub outroll_bonus_2gram: f64,
+    /// バイグラム: インロール（人差し指方向）ボーナス
+    pub inroll_bonus_2gram: f64,
 
     /// 準交互打鍵（LLR/RRL等）ボーナス（trigram単位）
     pub quasi_alt_bonus: f64,
 
-    /// アルペジオ打鍵（同手3連続かつ列単調）ボーナス（trigram単位）
-    pub arpeggio_bonus: f64,
+    /// トライグラム: アルペジオ・アウトロール（同手3連続かつ小指方向に列単調）ボーナス
+    pub outroll_bonus_3gram: f64,
+    /// トライグラム: アルペジオ・インロール（同手3連続かつ人差し指方向に列単調）ボーナス
+    pub inroll_bonus_3gram: f64,
 
     /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
     /// （デフォルトはすべて false = 削減なし）
@@ -75,10 +78,11 @@ impl Default for Weights {
             upper_lower_jump: 1.5,
             same_hand_base: 0.2,
             alternation_bonus: 0.6,
-            outroll_bonus: 0.4,
-            inroll_bonus: 0.15,
+            outroll_bonus_2gram: 0.4,
+            inroll_bonus_2gram: 0.15,
             quasi_alt_bonus: 0.1,
-            arpeggio_bonus: 0.15,
+            outroll_bonus_3gram: 0.3,
+            inroll_bonus_3gram: 0.1,
             daku_l2_trigger: [false; MAX_CHARS],
             handaku_l2_trigger: [false; MAX_CHARS],
         }
@@ -118,9 +122,9 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
         Hand::Right => c2 > c1,
     };
     cost -= if is_outroll {
-        w.outroll_bonus
+        w.outroll_bonus_2gram
     } else {
-        w.inroll_bonus
+        w.inroll_bonus_2gram
     };
     cost
 }
@@ -192,6 +196,10 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
 ///
 /// k1/k2/k3: 各文字の最終打鍵スロット（L2文字なら物理キー、L1なら当該スロット）
 /// h1/h2/h3: 各文字の手（Left/Right）
+///
+/// アルペジオ方向の定義（バイグラムと統一）:
+///   アウトロール: 左手=列減少方向（小指へ）、右手=列増加方向（小指へ）
+///   インロール  : 左手=列増加方向（人差指へ）、右手=列減少方向（人差指へ）
 /// ——————————————————————————————
 #[inline]
 pub fn trigram_cost(
@@ -205,13 +213,23 @@ pub fn trigram_cost(
         cost -= w.quasi_alt_bonus;
     }
     // アルペジオ打鍵ボーナス: 同手3連続 + 列番号が厳密単調（増加または減少）
-    if h1 == h2 && h2 == h3 && w.arpeggio_bonus != 0.0 {
+    if h1 == h2 && h2 == h3 {
         let nc = w.kp.num_cols;
         let c1 = slot_col(k1, nc);
         let c2 = slot_col(k2, nc);
         let c3 = slot_col(k3, nc);
-        if (c1 < c2 && c2 < c3) || (c1 > c2 && c2 > c3) {
-            cost -= w.arpeggio_bonus;
+        let increasing = c1 < c2 && c2 < c3;
+        let decreasing = c1 > c2 && c2 > c3;
+        if increasing || decreasing {
+            let is_outroll = match h1 {
+                Hand::Left => decreasing,  // 左手: 列減少 = 小指方向 = アウトロール
+                Hand::Right => increasing, // 右手: 列増加 = 小指方向 = アウトロール
+            };
+            cost -= if is_outroll {
+                w.outroll_bonus_3gram
+            } else {
+                w.inroll_bonus_3gram
+            };
         }
     }
     cost
@@ -376,10 +394,10 @@ pub fn delta_score(
 
     // トライグラムコスト差分
     // 準交互ボーナス: 両文字が同手ならスワップしても手パターン不変 → ゼロ
-    // アルペジオボーナス: 同手スワップでも列位置が変わるため常に再計算が必要
+    // アルペジオボーナス: 同手スワップでも列位置が変わるため再計算が必要
     let same_hand_swap =
         slot_hand(s1_old, w.kp.num_cols) == slot_hand(s2_old, w.kp.num_cols);
-    if !same_hand_swap || w.arpeggio_bonus != 0.0 {
+    if !same_hand_swap || w.outroll_bonus_3gram != 0.0 || w.inroll_bonus_3gram != 0.0 {
         for &c in &[swap_c1, swap_c2] {
             for &idx in &corpus.trigram_adj[c as usize] {
                 if buf.tri_stamp[idx] == gen {
