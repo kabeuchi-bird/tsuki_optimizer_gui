@@ -121,8 +121,7 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
     // バリデーション: 0..num_chars の全文字が有効スロットに1度ずつ配置されているか
     let num_chars = kp.num_chars;
     let mut slot_used = [false; MAX_SLOTS];
-    for c in 0..num_chars {
-        let s = cts[c];
+    for (c, &s) in cts[..num_chars].iter().enumerate() {
         if s == u8::MAX {
             let ch = if c < VOID_CHAR_FIRST as usize {
                 crate::chars::CHAR_LIST[c].to_string()
@@ -151,6 +150,7 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
 }
 
 /// 1文字をスロットへ割り当てる（cts / stc を更新）
+#[allow(clippy::too_many_arguments)]
 fn assign_char(
     c: char,
     slot: SlotId,
