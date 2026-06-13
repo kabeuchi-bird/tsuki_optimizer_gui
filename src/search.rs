@@ -987,6 +987,16 @@ fn build_initial_user_defined(
 
     match parse_user_layout(kp, def) {
         Ok(mut layout) => {
+            let violates_layer_constraints = (0..kp.num_chars as CharId).any(|c| {
+                (is_fixed(c, kp) || ctx.l1_only.contains(&c)) && !layout.is_l1(c)
+            });
+            if violates_layer_constraints {
+                let _ = writeln!(
+                    out,
+                    "警告: ユーザー定義配列が固定/L1固定制約に違反しています → ランダム配字にフォールバック"
+                );
+                return build_initial_random(ctx, kp, rng, out);
+            }
             fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
             layout
         }
