@@ -8,6 +8,7 @@ pub mod corpus;
 pub mod cost;
 pub mod layout;
 pub mod search;
+pub mod user_layout;
 
 /// ローカルタイムのタイムスタンプ文字列（YYMMDD_HHMMSS）を生成する
 pub fn local_timestamp() -> String {
@@ -69,11 +70,12 @@ pub fn write_config_summary(
     );
     let _ = writeln!(
         out,
-        " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}",
+        " bonuses        alt={:.2}  outroll={:.2}  inroll={:.2}  quasi_alt={:.2}  arpeggio={:.2}",
         weights.alternation_bonus,
         weights.outroll_bonus,
         weights.inroll_bonus,
-        weights.quasi_alt_bonus
+        weights.quasi_alt_bonus,
+        weights.arpeggio_bonus,
     );
     if let Some(p) = &toml_config.constraints.preset {
         let _ = writeln!(out, " constraints.preset = {}", p);

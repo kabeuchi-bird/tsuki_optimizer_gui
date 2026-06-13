@@ -68,6 +68,7 @@ pub struct WeightsConfig {
     pub outroll_bonus: Option<f64>,
     pub inroll_bonus: Option<f64>,
     pub quasi_alt_bonus: Option<f64>,
+    pub arpeggio_bonus: Option<f64>,
 }
 
 // ──────────────────────────────────────
@@ -154,6 +155,7 @@ impl Config {
             outroll_bonus: w.outroll_bonus.unwrap_or(d.outroll_bonus),
             inroll_bonus: w.inroll_bonus.unwrap_or(d.inroll_bonus),
             quasi_alt_bonus: w.quasi_alt_bonus.unwrap_or(d.quasi_alt_bonus),
+            arpeggio_bonus: w.arpeggio_bonus.unwrap_or(d.arpeggio_bonus),
             slot_difficulty: [
                 parse_difficulty_row(s.row0.as_deref(), d.slot_difficulty[0]),
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),

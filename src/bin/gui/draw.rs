@@ -403,7 +403,7 @@ impl App {
                     ui.label(format!("{:.4}", bd.bi_cost));
                     ui.end_row();
 
-                    ui.label("準交互ボーナス:");
+                    ui.label("トライグラムコスト:");
                     ui.label(format!("{:.4}", bd.tri_cost));
                     ui.end_row();
 
