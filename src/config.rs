@@ -65,9 +65,11 @@ pub struct WeightsConfig {
     pub upper_lower_jump: Option<f64>,
     pub same_hand_base: Option<f64>,
     pub alternation_bonus: Option<f64>,
-    pub outroll_bonus: Option<f64>,
-    pub inroll_bonus: Option<f64>,
+    pub outroll_bonus_2gram: Option<f64>,
+    pub inroll_bonus_2gram: Option<f64>,
     pub quasi_alt_bonus: Option<f64>,
+    pub outroll_bonus_3gram: Option<f64>,
+    pub inroll_bonus_3gram: Option<f64>,
 }
 
 // ──────────────────────────────────────
@@ -151,9 +153,11 @@ impl Config {
             upper_lower_jump: w.upper_lower_jump.unwrap_or(d.upper_lower_jump),
             same_hand_base: w.same_hand_base.unwrap_or(d.same_hand_base),
             alternation_bonus: w.alternation_bonus.unwrap_or(d.alternation_bonus),
-            outroll_bonus: w.outroll_bonus.unwrap_or(d.outroll_bonus),
-            inroll_bonus: w.inroll_bonus.unwrap_or(d.inroll_bonus),
+            outroll_bonus_2gram: w.outroll_bonus_2gram.unwrap_or(d.outroll_bonus_2gram),
+            inroll_bonus_2gram: w.inroll_bonus_2gram.unwrap_or(d.inroll_bonus_2gram),
             quasi_alt_bonus: w.quasi_alt_bonus.unwrap_or(d.quasi_alt_bonus),
+            outroll_bonus_3gram: w.outroll_bonus_3gram.unwrap_or(d.outroll_bonus_3gram),
+            inroll_bonus_3gram: w.inroll_bonus_3gram.unwrap_or(d.inroll_bonus_3gram),
             slot_difficulty: [
                 parse_difficulty_row(s.row0.as_deref(), d.slot_difficulty[0]),
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),

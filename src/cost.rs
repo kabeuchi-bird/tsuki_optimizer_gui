@@ -35,13 +35,19 @@ pub struct Weights {
 
     /// 左右交互打鍵ボーナス（差し引く値）
     pub alternation_bonus: f64,
-    /// アウトロール（小指方向）ボーナス
-    pub outroll_bonus: f64,
-    /// インロール（人差し指方向）ボーナス
-    pub inroll_bonus: f64,
+    /// バイグラム: アウトロール（小指方向）ボーナス
+    /// 左手: 列番号減少方向、右手: 列番号増加方向
+    pub outroll_bonus_2gram: f64,
+    /// バイグラム: インロール（人差し指方向）ボーナス
+    pub inroll_bonus_2gram: f64,
 
     /// 準交互打鍵（LLR/RRL等）ボーナス（trigram単位）
     pub quasi_alt_bonus: f64,
+
+    /// トライグラム: アルペジオ・アウトロール（同手3連続かつ小指方向に列単調）ボーナス
+    pub outroll_bonus_3gram: f64,
+    /// トライグラム: アルペジオ・インロール（同手3連続かつ人差し指方向に列単調）ボーナス
+    pub inroll_bonus_3gram: f64,
 
     /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
     /// （デフォルトはすべて false = 削減なし）
@@ -72,9 +78,11 @@ impl Default for Weights {
             upper_lower_jump: 1.5,
             same_hand_base: 0.2,
             alternation_bonus: 0.6,
-            outroll_bonus: 0.4,
-            inroll_bonus: 0.15,
+            outroll_bonus_2gram: 0.4,
+            inroll_bonus_2gram: 0.15,
             quasi_alt_bonus: 0.1,
+            outroll_bonus_3gram: 0.3,
+            inroll_bonus_3gram: 0.1,
             daku_l2_trigger: [false; MAX_CHARS],
             handaku_l2_trigger: [false; MAX_CHARS],
         }
@@ -114,9 +122,9 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
         Hand::Right => c2 > c1,
     };
     cost -= if is_outroll {
-        w.outroll_bonus
+        w.outroll_bonus_2gram
     } else {
-        w.inroll_bonus
+        w.inroll_bonus_2gram
     };
     cost
 }
@@ -184,15 +192,47 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
 }
 
 /// ——————————————————————————————
-/// 準交互打鍵ボーナス（trigram単位）
+/// トライグラムコスト（準交互ボーナス + アルペジオボーナス）
+///
+/// k1/k2/k3: 各文字の最終打鍵スロット（L2文字なら物理キー、L1なら当該スロット）
+/// h1/h2/h3: 各文字の手（Left/Right）
+///
+/// アルペジオ方向の定義（バイグラムと統一）:
+///   アウトロール: 左手=列減少方向（小指へ）、右手=列増加方向（小指へ）
+///   インロール  : 左手=列増加方向（人差指へ）、右手=列減少方向（人差指へ）
 /// ——————————————————————————————
 #[inline]
-pub fn quasi_alt_bonus(h1: Hand, h2: Hand, h3: Hand, w: &Weights) -> f64 {
+pub fn trigram_cost(
+    k1: SlotId, k2: SlotId, k3: SlotId,
+    h1: Hand, h2: Hand, h3: Hand,
+    w: &Weights,
+) -> f64 {
+    let mut cost = 0.0;
+    // 準交互打鍵ボーナス: LLR/RRL/LRR/RLL パターン
     if (h1 == h2) != (h2 == h3) {
-        -w.quasi_alt_bonus
-    } else {
-        0.0
+        cost -= w.quasi_alt_bonus;
     }
+    // アルペジオ打鍵ボーナス: 同手3連続 + 列番号が厳密単調（増加または減少）
+    if h1 == h2 && h2 == h3 {
+        let nc = w.kp.num_cols;
+        let c1 = slot_col(k1, nc);
+        let c2 = slot_col(k2, nc);
+        let c3 = slot_col(k3, nc);
+        let increasing = c1 < c2 && c2 < c3;
+        let decreasing = c1 > c2 && c2 > c3;
+        if increasing || decreasing {
+            let is_outroll = match h1 {
+                Hand::Left => decreasing,  // 左手: 列減少 = 小指方向 = アウトロール
+                Hand::Right => increasing, // 右手: 列増加 = 小指方向 = アウトロール
+            };
+            cost -= if is_outroll {
+                w.outroll_bonus_3gram
+            } else {
+                w.inroll_bonus_3gram
+            };
+        }
+    }
+    cost
 }
 
 /// ——————————————————————————————
@@ -231,15 +271,23 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
         total += bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
     }
 
-    // 4. トライグラム準交互ボーナス
+    // 4. トライグラムコスト（準交互ボーナス + アルペジオボーナス）
     for tg in &corpus.trigrams {
         if tg.freq == 0.0 {
             continue;
         }
-        let h1 = layout.primary_hand(tg.c1);
-        let h2 = layout.primary_hand(tg.c2);
-        let h3 = layout.primary_hand(tg.c3);
-        total += tg.freq * quasi_alt_bonus(h1, h2, h3, w);
+        let s1 = layout.char_to_slot[tg.c1 as usize];
+        let s2 = layout.char_to_slot[tg.c2 as usize];
+        let s3 = layout.char_to_slot[tg.c3 as usize];
+        total += tg.freq * trigram_cost(
+            keystrokes_for_slot(s1, w.kp).last(),
+            keystrokes_for_slot(s2, w.kp).last(),
+            keystrokes_for_slot(s3, w.kp).last(),
+            slot_hand(s1, w.kp.num_cols),
+            slot_hand(s2, w.kp.num_cols),
+            slot_hand(s3, w.kp.num_cols),
+            w,
+        );
     }
 
     total
@@ -344,9 +392,12 @@ pub fn delta_score(
         }
     }
 
-    // トライグラム準交互差分
-    // 両文字が同じ手にある場合、スワップしても手パターンは不変 → 差分ゼロ
-    if slot_hand(s1_old, w.kp.num_cols) != slot_hand(s2_old, w.kp.num_cols) {
+    // トライグラムコスト差分
+    // 準交互ボーナス: 両文字が同手ならスワップしても手パターン不変 → ゼロ
+    // アルペジオボーナス: 同手スワップでも列位置が変わるため再計算が必要
+    let same_hand_swap =
+        slot_hand(s1_old, w.kp.num_cols) == slot_hand(s2_old, w.kp.num_cols);
+    if !same_hand_swap || w.outroll_bonus_3gram != 0.0 || w.inroll_bonus_3gram != 0.0 {
         for &c in &[swap_c1, swap_c2] {
             for &idx in &corpus.trigram_adj[c as usize] {
                 if buf.tri_stamp[idx] == gen {
@@ -359,26 +410,33 @@ pub fn delta_score(
                     continue;
                 }
 
-                let h1_old = slot_hand(layout.char_to_slot[tg.c1 as usize], w.kp.num_cols);
-                let h2_old = slot_hand(layout.char_to_slot[tg.c2 as usize], w.kp.num_cols);
-                let h3_old = slot_hand(layout.char_to_slot[tg.c3 as usize], w.kp.num_cols);
-                let old_bonus = quasi_alt_bonus(h1_old, h2_old, h3_old, w);
+                let s_c1_old = layout.char_to_slot[tg.c1 as usize];
+                let s_c2_old = layout.char_to_slot[tg.c2 as usize];
+                let s_c3_old = layout.char_to_slot[tg.c3 as usize];
+                let old_cost = trigram_cost(
+                    keystrokes_for_slot(s_c1_old, w.kp).last(),
+                    keystrokes_for_slot(s_c2_old, w.kp).last(),
+                    keystrokes_for_slot(s_c3_old, w.kp).last(),
+                    slot_hand(s_c1_old, w.kp.num_cols),
+                    slot_hand(s_c2_old, w.kp.num_cols),
+                    slot_hand(s_c3_old, w.kp.num_cols),
+                    w,
+                );
 
-                let h1_new = slot_hand(
-                    slot_after_swap(layout, swap_c1, swap_c2, tg.c1),
-                    w.kp.num_cols,
+                let s_c1_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c1);
+                let s_c2_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c2);
+                let s_c3_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c3);
+                let new_cost = trigram_cost(
+                    keystrokes_for_slot(s_c1_new, w.kp).last(),
+                    keystrokes_for_slot(s_c2_new, w.kp).last(),
+                    keystrokes_for_slot(s_c3_new, w.kp).last(),
+                    slot_hand(s_c1_new, w.kp.num_cols),
+                    slot_hand(s_c2_new, w.kp.num_cols),
+                    slot_hand(s_c3_new, w.kp.num_cols),
+                    w,
                 );
-                let h2_new = slot_hand(
-                    slot_after_swap(layout, swap_c1, swap_c2, tg.c2),
-                    w.kp.num_cols,
-                );
-                let h3_new = slot_hand(
-                    slot_after_swap(layout, swap_c1, swap_c2, tg.c3),
-                    w.kp.num_cols,
-                );
-                let new_bonus = quasi_alt_bonus(h1_new, h2_new, h3_new, w);
 
-                delta += tg.freq * (new_bonus - old_bonus);
+                delta += tg.freq * (new_cost - old_cost);
             }
         }
     }
@@ -463,10 +521,18 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         if tg.freq == 0.0 {
             continue;
         }
-        let h1 = layout.primary_hand(tg.c1);
-        let h2 = layout.primary_hand(tg.c2);
-        let h3 = layout.primary_hand(tg.c3);
-        tri_cost += tg.freq * quasi_alt_bonus(h1, h2, h3, w);
+        let s1 = layout.char_to_slot[tg.c1 as usize];
+        let s2 = layout.char_to_slot[tg.c2 as usize];
+        let s3 = layout.char_to_slot[tg.c3 as usize];
+        tri_cost += tg.freq * trigram_cost(
+            keystrokes_for_slot(s1, w.kp).last(),
+            keystrokes_for_slot(s2, w.kp).last(),
+            keystrokes_for_slot(s3, w.kp).last(),
+            slot_hand(s1, w.kp.num_cols),
+            slot_hand(s2, w.kp.num_cols),
+            slot_hand(s3, w.kp.num_cols),
+            w,
+        );
     }
 
     ScoreBreakdown {
@@ -493,7 +559,7 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     );
     let _ = writeln!(out, "  難易度コスト  : {:.4}", bd.uni_cost);
     let _ = writeln!(out, "  バイグラムコスト: {:.4}", bd.bi_cost);
-    let _ = writeln!(out, "  準交互ボーナス: {:.4}", bd.tri_cost);
+    let _ = writeln!(out, "  トライグラムコスト: {:.4}", bd.tri_cost);
     let _ = writeln!(out, "  合計スコア    : {:.4}", bd.total);
 }
 

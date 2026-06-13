@@ -249,6 +249,8 @@ pub enum InitialLayoutMode {
     Tsuki2_263,
     /// 制約を守りつつランダムに配字
     Random,
+    /// initial_layout.toml で定義されたユーザー定義配列
+    UserDefined,
 }
 
 impl InitialLayoutMode {
@@ -256,6 +258,7 @@ impl InitialLayoutMode {
         match self {
             Self::Tsuki2_263 => "2-263",
             Self::Random => "ランダム",
+            Self::UserDefined => "ユーザー定義",
         }
     }
 
@@ -263,6 +266,7 @@ impl InitialLayoutMode {
         match self {
             Self::Tsuki2_263 => "2-263（月配列2-263ベース）",
             Self::Random => "random（ランダム配字）",
+            Self::UserDefined => "user-defined（initial_layout.toml）",
         }
     }
 
@@ -270,6 +274,7 @@ impl InitialLayoutMode {
         match s {
             "random" => Self::Random,
             "2-263" => Self::Tsuki2_263,
+            "user-defined" => Self::UserDefined,
             _ => {
                 eprintln!("警告: 不明な initial_layout '{}' → 2-263 を使用します", s);
                 Self::Tsuki2_263
@@ -862,6 +867,7 @@ pub fn build_initial_layout(
     let layout = match mode {
         InitialLayoutMode::Tsuki2_263 => build_initial_2_263(ctx, kp, out),
         InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
+        InitialLayoutMode::UserDefined => build_initial_user_defined(ctx, kp, rng, out),
     };
 
     let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
@@ -935,6 +941,74 @@ fn build_initial_2_263(
 
     fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
     layout
+}
+
+/// initial_layout.toml からユーザー定義配列を読み込む。
+/// ファイルが存在しない・パース失敗・定義不正の場合はログに警告を記録し
+/// ランダム配字にフォールバックする。
+fn build_initial_user_defined(
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    rng: &mut impl Rng,
+    out: &mut impl Write,
+) -> Layout {
+    use crate::user_layout::{parse_user_layout, UserLayoutFile, USER_LAYOUT_PATH};
+    use std::path::Path;
+
+    let path = Path::new(USER_LAYOUT_PATH);
+
+    let user_file = match UserLayoutFile::from_file(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "警告: ユーザー定義配列を使用できません（{}）→ ランダム配字にフォールバック",
+                e
+            );
+            return build_initial_random(ctx, kp, rng, out);
+        }
+    };
+
+    let size_key = match kp.size {
+        crate::layout::KeyboardSize::K3x10 => "layout_3x10",
+        crate::layout::KeyboardSize::K3x11 => "layout_3x11",
+    };
+    let def = match user_file.get_def(kp) {
+        Some(d) => d,
+        None => {
+            let _ = writeln!(
+                out,
+                "警告: initial_layout.toml に [{}] セクションがありません → ランダム配字にフォールバック",
+                size_key
+            );
+            return build_initial_random(ctx, kp, rng, out);
+        }
+    };
+
+    match parse_user_layout(kp, def) {
+        Ok(mut layout) => {
+            let violates_layer_constraints = (0..kp.num_chars as CharId).any(|c| {
+                (is_fixed(c, kp) || ctx.l1_only.contains(&c)) && !layout.is_l1(c)
+            });
+            if violates_layer_constraints {
+                let _ = writeln!(
+                    out,
+                    "警告: ユーザー定義配列が固定/L1固定制約に違反しています → ランダム配字にフォールバック"
+                );
+                return build_initial_random(ctx, kp, rng, out);
+            }
+            fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
+            layout
+        }
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "警告: ユーザー定義配列の解析に失敗しました（{}）→ ランダム配字にフォールバック",
+                e
+            );
+            build_initial_random(ctx, kp, rng, out)
+        }
+    }
 }
 
 /// ランダム配字：制約を守りつつ全文字をランダムにシャッフル

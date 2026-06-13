@@ -61,6 +61,11 @@ impl eframe::App for App {
                             "random".to_string(),
                             "ランダム",
                         );
+                        ui.selectable_value(
+                            &mut self.initial_layout_str_input,
+                            "user-defined".to_string(),
+                            "ユーザー定義",
+                        );
                     });
             });
 
