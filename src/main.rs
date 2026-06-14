@@ -19,7 +19,7 @@
 //   --stroke-scale  <f>     打鍵数スケール           (toml: weights.stroke_scale)
 //   --log-interval  <n>     ログ間隔                 (toml: run.log_interval)
 //   --keyboard-size <s>     キーボードサイズ         (toml: run.keyboard_size)
-//                           "3x10"（デフォルト）または "3x11"
+//                           "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
 use rand::rngs::SmallRng;
@@ -129,6 +129,7 @@ fn main() {
     let kp = if let Some(ks) = cli.get("--keyboard-size") {
         match ks.as_str() {
             "3x11" => layout::KeyboardParams::k3x11(),
+            "3x10_single_shift" => layout::KeyboardParams::k3x10_single_shift(),
             "3x10" => layout::KeyboardParams::k3x10(),
             other => {
                 eprintln!(

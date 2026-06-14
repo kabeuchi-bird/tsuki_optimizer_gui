@@ -17,6 +17,8 @@ pub const SHIFT_SLOT_SENTINEL: CharId = u8::MAX;
 pub const D_SLOT: SlotId = 12;
 /// Layer 1 上のKキースロット（3x10: row1, col7 → 。固定）
 pub const K_SLOT: SlotId = 17;
+/// 3x10_single_shift の単一シフトキースロット（row0, col2 → E位置、、固定）
+pub const E_SHIFT_SLOT: SlotId = 2;
 
 // ──────────────────────────────────────────────────────────────
 // キーボードサイズ設定
@@ -25,6 +27,8 @@ pub const K_SLOT: SlotId = 17;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyboardSize {
     K3x10,
+    /// 3x10と同じグリッドだが、シフトキーをE位置（slot2）の1個のみとし、、を固定配置する
+    K3x10SingleShift,
     K3x11,
 }
 
@@ -61,6 +65,23 @@ impl KeyboardParams {
             num_chars: 60,
             shift_left: D_SLOT,  // 12
             shift_right: K_SLOT, // 17
+        }
+    }
+
+    /// 3x10キーボード（単一シフト版）
+    ///
+    /// グリッド・スロット数・文字数は 3x10 と同一。
+    /// シフトキーは E位置（row0, col2 = slot 2）の1個のみで、、をそこに固定する。
+    /// 左右どちらのL2文字もこの単一シフトキーで打鍵するため、shift_left = shift_right = 2。
+    pub fn k3x10_single_shift() -> Self {
+        KeyboardParams {
+            size: KeyboardSize::K3x10SingleShift,
+            num_cols: 10,
+            num_slots_per_layer: 30,
+            num_slots: 60,
+            num_chars: 60,
+            shift_left: E_SHIFT_SLOT,  // 2（単一シフト）
+            shift_right: E_SHIFT_SLOT, // 2（単一シフト）
         }
     }
 
@@ -220,6 +241,23 @@ impl Layout {
                     stc[i] = i as CharId;
                 }
             }
+            KeyboardSize::K3x10SingleShift => {
+                // 3x10 と同じ char i → slot i をベースにする。
+                for i in 0..60usize {
+                    cts[i] = i as SlotId;
+                    stc[i] = i as CharId;
+                }
+                // 、(TOUTEN_ID) を単一シフト位置 E_SHIFT_SLOT へ固定配置する。
+                // 元々その位置にあった文字は 、の旧スロットへ退避（純粋なスワップ）。
+                let dst = E_SHIFT_SLOT as usize;
+                let src = TOUTEN_ID as usize; // 恒等配置での 、 の初期スロット
+                let cd = stc[dst];
+                let cs = stc[src];
+                stc[dst] = cs;
+                stc[src] = cd;
+                cts[cd as usize] = src as SlotId;
+                cts[cs as usize] = dst as SlotId;
+            }
             KeyboardSize::K3x11 => {
                 // 月配列2-263の3x11初期配置
                 //
@@ -297,11 +335,12 @@ impl Layout {
 
     /// 実打鍵数を返す
     /// 3x10: 。/、は K/D + Enter で 2打鍵
+    /// 3x10_single_shift: 、は E（シフトキー）+ Enter で 2打鍵（。は通常文字扱い）
     /// 3x11: 。/、は通常文字扱い（L1なら1打鍵、L2なら2打鍵）
     #[inline]
     pub fn char_stroke_count(&self, c: CharId) -> u32 {
-        if self.kp.size == KeyboardSize::K3x10 && (c == KUTEN_ID || c == TOUTEN_ID) {
-            2 // K/D + Enter
+        if punct_needs_enter(c, self.kp.size) {
+            2 // シフトキー + Enter
         } else if self.is_l1(c) {
             1
         } else {
@@ -386,11 +425,26 @@ pub fn slot_after_swap(layout: &Layout, swap_c1: CharId, swap_c2: CharId, c: Cha
 
 /// 文字cが固定（動かせない）かどうか
 /// 3x10: 。と、は K/D スロット固定
+/// 3x10_single_shift: 、のみ単一シフトキーに固定（。は自由）
 /// 3x11: 固定文字なし（☆★はスロットとして管理され、CharIdを持たない）
 #[inline]
 pub fn is_fixed(c: CharId, kp: KeyboardParams) -> bool {
     match kp.size {
         KeyboardSize::K3x10 => c == TOUTEN_ID || c == KUTEN_ID,
+        KeyboardSize::K3x10SingleShift => c == TOUTEN_ID,
+        KeyboardSize::K3x11 => false,
+    }
+}
+
+/// 文字cがシフトキー兼用のため Enter 確定で打鍵数+1（合計2打鍵）になるか
+/// 3x10: 、。（D/K がシフトキー兼用）
+/// 3x10_single_shift: 、（E がシフトキー兼用。。は通常文字）
+/// 3x11: なし
+#[inline]
+pub fn punct_needs_enter(c: CharId, size: KeyboardSize) -> bool {
+    match size {
+        KeyboardSize::K3x10 => c == KUTEN_ID || c == TOUTEN_ID,
+        KeyboardSize::K3x10SingleShift => c == TOUTEN_ID,
         KeyboardSize::K3x11 => false,
     }
 }
@@ -531,6 +585,40 @@ mod tests {
         assert_eq!(layout.char_to_slot[0], 0);
         assert_eq!(layout.char_to_slot[59], 59);
         assert_eq!(layout.slot_to_char[0], 0);
+    }
+
+    #[test]
+    fn test_single_shift_params_and_fixed() {
+        let kp = KeyboardParams::k3x10_single_shift();
+        // 単一シフト: shift_left == shift_right == E_SHIFT_SLOT
+        assert_eq!(kp.shift_left, E_SHIFT_SLOT);
+        assert_eq!(kp.shift_right, E_SHIFT_SLOT);
+        assert_eq!(kp.num_chars, 60);
+        assert_eq!(kp.num_slots, 60);
+        // 、のみ固定、。は自由
+        assert!(is_fixed(TOUTEN_ID, kp));
+        assert!(!is_fixed(KUTEN_ID, kp));
+        // 、は2打鍵（E+Enter）、。は通常文字
+        assert!(punct_needs_enter(TOUTEN_ID, kp.size));
+        assert!(!punct_needs_enter(KUTEN_ID, kp.size));
+    }
+
+    #[test]
+    fn test_initial_layout_single_shift() {
+        let kp = KeyboardParams::k3x10_single_shift();
+        let layout = Layout::initial(kp);
+        // 、が単一シフト位置 slot2 に配置されている
+        assert_eq!(layout.char_to_slot[TOUTEN_ID as usize], E_SHIFT_SLOT);
+        assert_eq!(layout.slot_to_char[E_SHIFT_SLOT as usize], TOUTEN_ID);
+        // 60文字すべてが一意のスロットに配置されている
+        let mut slots_used: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        for c in 0..60u8 {
+            let s = layout.char_to_slot[c as usize];
+            assert!(slots_used.insert(s), "duplicate slot for char {c}");
+            assert_eq!(layout.slot_to_char[s as usize], c);
+        }
+        // 、は2打鍵
+        assert_eq!(layout.char_stroke_count(TOUTEN_ID), 2);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub const USER_LAYOUT_PATH: &str = "initial_layout.toml";
 #[serde(deny_unknown_fields)]
 pub struct UserLayoutFile {
     pub layout_3x10: Option<UserLayoutDef>,
+    pub layout_3x10_single_shift: Option<UserLayoutDef>,
     pub layout_3x11: Option<UserLayoutDef>,
 }
 
@@ -39,6 +40,7 @@ impl UserLayoutFile {
     pub fn get_def(&self, kp: KeyboardParams) -> Option<&UserLayoutDef> {
         match kp.size {
             KeyboardSize::K3x10 => self.layout_3x10.as_ref(),
+            KeyboardSize::K3x10SingleShift => self.layout_3x10_single_shift.as_ref(),
             KeyboardSize::K3x11 => self.layout_3x11.as_ref(),
         }
     }

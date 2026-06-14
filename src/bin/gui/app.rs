@@ -137,6 +137,7 @@ impl App {
 
         let kp = match self.keyboard_size_str_input.as_str() {
             "3x11" => KeyboardParams::k3x11(),
+            "3x10_single_shift" => KeyboardParams::k3x10_single_shift(),
             _ => KeyboardParams::k3x10(),
         };
 

@@ -473,10 +473,8 @@ pub fn delta_score(
 /// 打鍵数計算（スロットと文字種から）
 #[inline]
 fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
-    let is_3x10_punct =
-        kp.size == crate::layout::KeyboardSize::K3x10 && (c == KUTEN_ID || c == TOUTEN_ID);
-    if is_3x10_punct {
-        2 // K/D + Enter
+    if crate::layout::punct_needs_enter(c, kp.size) {
+        2 // シフトキー + Enter
     } else if (slot as usize) < kp.num_slots_per_layer as usize {
         1
     } else {
@@ -809,6 +807,18 @@ mod tests {
             layout.swap_chars(c1, c2);
         }
 
+        verify_all_pairs(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_delta_score_all_pairs_single_shift() {
+        let kp = KeyboardParams::k3x10_single_shift();
+        let layout = Layout::initial(kp);
+        let corpus = Corpus::from_str(RICH_CORPUS);
+        let weights = Weights {
+            kp,
+            ..Weights::default()
+        };
         verify_all_pairs(&layout, &corpus, &weights);
     }
 

@@ -47,7 +47,7 @@ pub struct RunConfig {
     pub tenure_grow_interval: Option<usize>,
     pub tenure_max_scale: Option<f64>,
 
-    /// キーボードサイズ: "3x10"（デフォルト）または "3x11"
+    /// キーボードサイズ: "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
     pub keyboard_size: Option<String>,
     /// 初期配列モード: "2-263"（デフォルト）または "random"
     pub initial_layout: Option<String>,
@@ -102,6 +102,7 @@ impl Config {
     pub fn build_keyboard_params(&self) -> KeyboardParams {
         match self.run.keyboard_size.as_deref() {
             Some("3x11") => KeyboardParams::k3x11(),
+            Some("3x10_single_shift") => KeyboardParams::k3x10_single_shift(),
             Some("3x10") | None => KeyboardParams::k3x10(),
             Some(other) => {
                 eprintln!("警告: 不明な keyboard_size '{}' → 3x10 を使用します", other);
@@ -332,6 +333,7 @@ fn parse_difficulty_row(src: Option<&[f64]>, default: [f64; 11]) -> [f64; 11] {
 pub fn keyboard_size_str(kp: &KeyboardParams) -> &'static str {
     match kp.size {
         KeyboardSize::K3x10 => "3x10",
+        KeyboardSize::K3x10SingleShift => "3x10_single_shift",
         KeyboardSize::K3x11 => "3x11",
     }
 }

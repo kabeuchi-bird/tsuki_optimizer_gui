@@ -42,6 +42,11 @@ impl eframe::App for App {
                         );
                         ui.selectable_value(
                             &mut self.keyboard_size_str_input,
+                            "3x10_single_shift".to_string(),
+                            "3x10 単一シフト",
+                        );
+                        ui.selectable_value(
+                            &mut self.keyboard_size_str_input,
                             "3x11".to_string(),
                             "3x11",
                         );

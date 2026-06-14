@@ -901,6 +901,7 @@ fn build_initial_2_263(
 
     let l1_fixed_count = match kp.size {
         crate::layout::KeyboardSize::K3x10 => 4, // 。、゛゜
+        crate::layout::KeyboardSize::K3x10SingleShift => 3, // 、゛゜（。は自由）
         crate::layout::KeyboardSize::K3x11 => 2, // ゛゜のみ（。、は自由）
     };
     let l1_free_slots = l1_char_slots - l1_fixed_count;
@@ -971,6 +972,7 @@ fn build_initial_user_defined(
 
     let size_key = match kp.size {
         crate::layout::KeyboardSize::K3x10 => "layout_3x10",
+        crate::layout::KeyboardSize::K3x10SingleShift => "layout_3x10_single_shift",
         crate::layout::KeyboardSize::K3x11 => "layout_3x11",
     };
     let def = match user_file.get_def(kp) {
