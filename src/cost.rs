@@ -94,6 +94,22 @@ impl Default for Weights {
     }
 }
 
+/// 同手ロールコスト（`allow_index_roll` 分岐と通常の同手異指分岐で共用）
+#[inline]
+fn same_hand_roll_cost(k1: SlotId, k2: SlotId, h1: Hand, c1: u8, c2: u8, w: &Weights) -> f64 {
+    let mut cost = w.same_hand_base;
+    let nc = w.kp.num_cols;
+    if (slot_row(k1, nc) as i8 - slot_row(k2, nc) as i8).abs() == 2 {
+        cost += w.upper_lower_jump;
+    }
+    let is_outroll = match h1 {
+        Hand::Left => c2 < c1,
+        Hand::Right => c2 > c1,
+    };
+    cost -= if is_outroll { w.outroll_bonus_2gram } else { w.inroll_bonus_2gram };
+    cost
+}
+
 /// ——————————————————————————————
 /// 2キー間のトランジションコスト
 /// ——————————————————————————————
@@ -103,29 +119,13 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
     if k1 == k2 {
         return w.same_key_penalty;
     }
-    let f1 = col_to_finger(slot_col(k1, nc));
-    let f2 = col_to_finger(slot_col(k2, nc));
+    let c1 = slot_col(k1, nc);
+    let c2 = slot_col(k2, nc);
+    let f1 = col_to_finger(c1);
+    let f2 = col_to_finger(c2);
     if f1 == f2 {
-        // allow_index_roll が有効なとき、人差し指の2列間遷移（左: col3↔col4, 右: col5↔col6）を
-        // 同指ペナルティではなくロールとして評価する
-        if w.allow_index_roll {
-            let c1 = slot_col(k1, nc);
-            let c2 = slot_col(k2, nc);
-            if matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
-                let h1 = slot_hand(k1, nc);
-                let mut cost = w.same_hand_base;
-                let r1 = slot_row(k1, nc);
-                let r2 = slot_row(k2, nc);
-                if (r1 as i8 - r2 as i8).abs() == 2 {
-                    cost += w.upper_lower_jump;
-                }
-                let is_outroll = match h1 {
-                    Hand::Left => c2 < c1,   // col4→col3: 小指方向 = アウトロール
-                    Hand::Right => c2 > c1,  // col5→col6: 小指方向 = アウトロール
-                };
-                cost -= if is_outroll { w.outroll_bonus_2gram } else { w.inroll_bonus_2gram };
-                return cost;
-            }
+        if w.allow_index_roll && matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
+            return same_hand_roll_cost(k1, k2, slot_hand(k1, nc), c1, c2, w);
         }
         return w.same_finger_penalty;
     }
@@ -134,25 +134,7 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
     if h1 != h2 {
         return -w.alternation_bonus;
     }
-    // 同手・異指
-    let mut cost = w.same_hand_base;
-    let r1 = slot_row(k1, nc);
-    let r2 = slot_row(k2, nc);
-    if (r1 as i8 - r2 as i8).abs() == 2 {
-        cost += w.upper_lower_jump;
-    }
-    let c1 = slot_col(k1, nc);
-    let c2 = slot_col(k2, nc);
-    let is_outroll = match h1 {
-        Hand::Left => c2 < c1,
-        Hand::Right => c2 > c1,
-    };
-    cost -= if is_outroll {
-        w.outroll_bonus_2gram
-    } else {
-        w.inroll_bonus_2gram
-    };
-    cost
+    same_hand_roll_cost(k1, k2, h1, c1, c2, w)
 }
 
 /// ——————————————————————————————

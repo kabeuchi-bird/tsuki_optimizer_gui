@@ -235,28 +235,23 @@ impl Layout {
         let mut stc = [SHIFT_SLOT_SENTINEL; MAX_SLOTS];
 
         match kp.size {
-            KeyboardSize::K3x10 => {
+            KeyboardSize::K3x10 | KeyboardSize::K3x10SingleShift => {
                 for i in 0..60usize {
                     cts[i] = i as SlotId;
                     stc[i] = i as CharId;
                 }
-            }
-            KeyboardSize::K3x10SingleShift => {
-                // 3x10 と同じ char i → slot i をベースにする。
-                for i in 0..60usize {
-                    cts[i] = i as SlotId;
-                    stc[i] = i as CharId;
+                if kp.size == KeyboardSize::K3x10SingleShift {
+                    // 、(TOUTEN_ID) を単一シフト位置 E_SHIFT_SLOT へ固定配置する。
+                    // 元々その位置にあった文字は 、の旧スロットへ退避（純粋なスワップ）。
+                    let dst = E_SHIFT_SLOT as usize;
+                    let src = TOUTEN_ID as usize;
+                    let cd = stc[dst];
+                    let cs = stc[src];
+                    stc[dst] = cs;
+                    stc[src] = cd;
+                    cts[cd as usize] = src as SlotId;
+                    cts[cs as usize] = dst as SlotId;
                 }
-                // 、(TOUTEN_ID) を単一シフト位置 E_SHIFT_SLOT へ固定配置する。
-                // 元々その位置にあった文字は 、の旧スロットへ退避（純粋なスワップ）。
-                let dst = E_SHIFT_SLOT as usize;
-                let src = TOUTEN_ID as usize; // 恒等配置での 、 の初期スロット
-                let cd = stc[dst];
-                let cs = stc[src];
-                stc[dst] = cs;
-                stc[src] = cd;
-                cts[cd as usize] = src as SlotId;
-                cts[cs as usize] = dst as SlotId;
             }
             KeyboardSize::K3x11 => {
                 // 月配列2-263の3x11初期配置

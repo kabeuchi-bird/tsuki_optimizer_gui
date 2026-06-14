@@ -29,10 +29,9 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tsuki_optimize::config::Config;
+use tsuki_optimize::config::{keyboard_params_from_str, Config};
 use tsuki_optimize::corpus::Corpus;
 use tsuki_optimize::cost::score;
-use tsuki_optimize::layout;
 use tsuki_optimize::search;
 
 // ──────────────────────────────────────────────────────────────
@@ -127,18 +126,7 @@ fn main() {
     // ── キーボードサイズ決定（CLI > TOML > デフォルト）──
     // CLIの --keyboard-size が TOML の run.keyboard_size を上書きする
     let kp = if let Some(ks) = cli.get("--keyboard-size") {
-        match ks.as_str() {
-            "3x11" => layout::KeyboardParams::k3x11(),
-            "3x10_single_shift" => layout::KeyboardParams::k3x10_single_shift(),
-            "3x10" => layout::KeyboardParams::k3x10(),
-            other => {
-                eprintln!(
-                    "警告: 不明な --keyboard-size '{}' → 3x10 を使用します",
-                    other
-                );
-                layout::KeyboardParams::k3x10()
-            }
-        }
+        keyboard_params_from_str(ks)
     } else {
         toml_config.build_keyboard_params()
     };

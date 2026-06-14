@@ -101,13 +101,8 @@ impl Config {
     /// keyboard_size 設定から KeyboardParams を生成する
     pub fn build_keyboard_params(&self) -> KeyboardParams {
         match self.run.keyboard_size.as_deref() {
-            Some("3x11") => KeyboardParams::k3x11(),
-            Some("3x10_single_shift") => KeyboardParams::k3x10_single_shift(),
-            Some("3x10") | None => KeyboardParams::k3x10(),
-            Some(other) => {
-                eprintln!("警告: 不明な keyboard_size '{}' → 3x10 を使用します", other);
-                KeyboardParams::k3x10()
-            }
+            Some(s) => keyboard_params_from_str(s),
+            None => KeyboardParams::k3x10(),
         }
     }
 
@@ -329,7 +324,20 @@ fn parse_difficulty_row(src: Option<&[f64]>, default: [f64; 11]) -> [f64; 11] {
     arr
 }
 
-/// TOMLの keyboard_size 文字列から KeyboardSize を解析（表示用）
+/// キーボードサイズ文字列から KeyboardParams を生成する（CLI / GUI 共通）
+pub fn keyboard_params_from_str(s: &str) -> KeyboardParams {
+    match s {
+        "3x11" => KeyboardParams::k3x11(),
+        "3x10_single_shift" => KeyboardParams::k3x10_single_shift(),
+        "3x10" => KeyboardParams::k3x10(),
+        other => {
+            eprintln!("警告: 不明な keyboard_size '{}' → 3x10 を使用します", other);
+            KeyboardParams::k3x10()
+        }
+    }
+}
+
+/// KeyboardParams からキーボードサイズ文字列を返す（表示用）
 pub fn keyboard_size_str(kp: &KeyboardParams) -> &'static str {
     match kp.size {
         KeyboardSize::K3x10 => "3x10",
