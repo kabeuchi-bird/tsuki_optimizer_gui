@@ -49,6 +49,10 @@ pub struct Weights {
     /// トライグラム: アルペジオ・インロール（同手3連続かつ人差し指方向に列単調）ボーナス
     pub inroll_bonus_3gram: f64,
 
+    /// 人差し指2列間（左: col3↔col4、右: col5↔col6）の遷移を同指ペナルティではなく
+    /// インロール/アウトロールとして評価するか（デフォルト: false）
+    pub allow_index_roll: bool,
+
     /// プリセット有効時: この文字がL2に配置されているとき、直後の゛コストを -stroke_scale 削減する
     /// （デフォルトはすべて false = 削減なし）
     pub daku_l2_trigger: [bool; MAX_CHARS],
@@ -83,10 +87,27 @@ impl Default for Weights {
             quasi_alt_bonus: 0.1,
             outroll_bonus_3gram: 0.3,
             inroll_bonus_3gram: 0.1,
+            allow_index_roll: false,
             daku_l2_trigger: [false; MAX_CHARS],
             handaku_l2_trigger: [false; MAX_CHARS],
         }
     }
+}
+
+/// 同手ロールコスト（`allow_index_roll` 分岐と通常の同手異指分岐で共用）
+#[inline]
+fn same_hand_roll_cost(k1: SlotId, k2: SlotId, h1: Hand, c1: u8, c2: u8, w: &Weights) -> f64 {
+    let mut cost = w.same_hand_base;
+    let nc = w.kp.num_cols;
+    if (slot_row(k1, nc) as i8 - slot_row(k2, nc) as i8).abs() == 2 {
+        cost += w.upper_lower_jump;
+    }
+    let is_outroll = match h1 {
+        Hand::Left => c2 < c1,
+        Hand::Right => c2 > c1,
+    };
+    cost -= if is_outroll { w.outroll_bonus_2gram } else { w.inroll_bonus_2gram };
+    cost
 }
 
 /// ——————————————————————————————
@@ -98,9 +119,14 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
     if k1 == k2 {
         return w.same_key_penalty;
     }
-    let f1 = col_to_finger(slot_col(k1, nc));
-    let f2 = col_to_finger(slot_col(k2, nc));
+    let c1 = slot_col(k1, nc);
+    let c2 = slot_col(k2, nc);
+    let f1 = col_to_finger(c1);
+    let f2 = col_to_finger(c2);
     if f1 == f2 {
+        if w.allow_index_roll && matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
+            return same_hand_roll_cost(k1, k2, slot_hand(k1, nc), c1, c2, w);
+        }
         return w.same_finger_penalty;
     }
     let h1 = slot_hand(k1, nc);
@@ -108,25 +134,7 @@ pub fn key_pair_cost(k1: SlotId, k2: SlotId, w: &Weights) -> f64 {
     if h1 != h2 {
         return -w.alternation_bonus;
     }
-    // 同手・異指
-    let mut cost = w.same_hand_base;
-    let r1 = slot_row(k1, nc);
-    let r2 = slot_row(k2, nc);
-    if (r1 as i8 - r2 as i8).abs() == 2 {
-        cost += w.upper_lower_jump;
-    }
-    let c1 = slot_col(k1, nc);
-    let c2 = slot_col(k2, nc);
-    let is_outroll = match h1 {
-        Hand::Left => c2 < c1,
-        Hand::Right => c2 > c1,
-    };
-    cost -= if is_outroll {
-        w.outroll_bonus_2gram
-    } else {
-        w.inroll_bonus_2gram
-    };
-    cost
+    same_hand_roll_cost(k1, k2, h1, c1, c2, w)
 }
 
 /// ——————————————————————————————
@@ -447,10 +455,8 @@ pub fn delta_score(
 /// 打鍵数計算（スロットと文字種から）
 #[inline]
 fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
-    let is_3x10_punct =
-        kp.size == crate::layout::KeyboardSize::K3x10 && (c == KUTEN_ID || c == TOUTEN_ID);
-    if is_3x10_punct {
-        2 // K/D + Enter
+    if crate::layout::punct_needs_enter(c, kp.size) {
+        2 // シフトキー + Enter
     } else if (slot as usize) < kp.num_slots_per_layer as usize {
         1
     } else {
@@ -598,9 +604,18 @@ pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mu
         if k1 == k2 {
             return "同キー";
         }
-        let f1 = col_to_finger(slot_col(k1, nc));
-        let f2 = col_to_finger(slot_col(k2, nc));
+        let c1 = slot_col(k1, nc);
+        let c2 = slot_col(k2, nc);
+        let f1 = col_to_finger(c1);
+        let f2 = col_to_finger(c2);
         if f1 == f2 {
+            if w.allow_index_roll && matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
+                let is_outroll = match slot_hand(k1, nc) {
+                    Hand::Left => c2 < c1,
+                    Hand::Right => c2 > c1,
+                };
+                return if is_outroll { "OUT" } else { "IN" };
+            }
             return "同指";
         }
         let h1 = slot_hand(k1, nc);
@@ -608,8 +623,6 @@ pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mu
         if h1 != h2 {
             return "交互";
         }
-        let c1 = slot_col(k1, nc);
-        let c2 = slot_col(k2, nc);
         let is_outroll = match h1 {
             Hand::Left => c2 < c1,
             Hand::Right => c2 > c1,
@@ -783,6 +796,18 @@ mod tests {
             layout.swap_chars(c1, c2);
         }
 
+        verify_all_pairs(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_delta_score_all_pairs_single_shift() {
+        let kp = KeyboardParams::k3x10_single_shift();
+        let layout = Layout::initial(kp);
+        let corpus = Corpus::from_str(RICH_CORPUS);
+        let weights = Weights {
+            kp,
+            ..Weights::default()
+        };
         verify_all_pairs(&layout, &corpus, &weights);
     }
 

@@ -899,11 +899,17 @@ fn build_initial_2_263(
             0
         };
 
-    let l1_fixed_count = match kp.size {
-        crate::layout::KeyboardSize::K3x10 => 4, // 。、゛゜
-        crate::layout::KeyboardSize::K3x11 => 2, // ゛゜のみ（。、は自由）
-    };
-    let l1_free_slots = l1_char_slots - l1_fixed_count;
+    let l1_fixed_count = (0..kp.num_chars as CharId)
+        .filter(|&c| !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)))
+        .count();
+    if l1_fixed_count > l1_char_slots {
+        let _ = writeln!(
+            out,
+            "警告: L1固定文字数({})がL1スロット数({})を超えています。可動L1枠は0として扱います。",
+            l1_fixed_count, l1_char_slots
+        );
+    }
+    let l1_free_slots = l1_char_slots.saturating_sub(l1_fixed_count);
 
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
@@ -969,17 +975,13 @@ fn build_initial_user_defined(
         }
     };
 
-    let size_key = match kp.size {
-        crate::layout::KeyboardSize::K3x10 => "layout_3x10",
-        crate::layout::KeyboardSize::K3x11 => "layout_3x11",
-    };
     let def = match user_file.get_def(kp) {
         Some(d) => d,
         None => {
             let _ = writeln!(
                 out,
-                "警告: initial_layout.toml に [{}] セクションがありません → ランダム配字にフォールバック",
-                size_key
+                "警告: initial_layout.toml に [layout_{}] セクションがありません → ランダム配字にフォールバック",
+                crate::config::keyboard_size_str(&kp)
             );
             return build_initial_random(ctx, kp, rng, out);
         }

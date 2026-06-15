@@ -93,17 +93,19 @@ impl App {
                         } else if char_id == SHIFT_SLOT_SENTINEL || char_id >= VOID_CHAR_FIRST {
                             egui::Color32::from_rgb(200, 200, 200)
                         } else {
-                            // 3x10 のシフトキー兼文字キー（D/K）はシフト打鍵分を加算
+                            // シフトキー兼文字キー（3x10のD/K、単一シフトのE）はシフト打鍵分を加算。
+                            // 単一シフト（shift_left == shift_right）では両手分を合算する。
                             let extra = if let ColorData::Frequency { shift_freq, .. } = color_data
                             {
                                 let s = layout.char_to_slot[char_id as usize];
+                                let mut e = 0.0;
                                 if s == kp.shift_left {
-                                    shift_freq[0]
-                                } else if s == kp.shift_right {
-                                    shift_freq[1]
-                                } else {
-                                    0.0
+                                    e += shift_freq[0];
                                 }
+                                if s == kp.shift_right {
+                                    e += shift_freq[1];
+                                }
+                                e
                             } else {
                                 0.0
                             };

@@ -5,10 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use tsuki_optimize::config::Config;
+use tsuki_optimize::config::{keyboard_params_from_str, Config};
 use tsuki_optimize::corpus::Corpus;
 use tsuki_optimize::cost::{score, Weights};
-use tsuki_optimize::layout::KeyboardParams;
 use tsuki_optimize::search::{self, SearchContext, SearchPhase, SearchUpdate};
 
 use super::log_writer::{ColorData, ColorMode, GuiLogWriter};
@@ -135,10 +134,7 @@ impl App {
             Config::default()
         };
 
-        let kp = match self.keyboard_size_str_input.as_str() {
-            "3x11" => KeyboardParams::k3x11(),
-            _ => KeyboardParams::k3x10(),
-        };
+        let kp = keyboard_params_from_str(&self.keyboard_size_str_input);
 
         let exclusive_pairs = toml_config.build_exclusive_pairs();
         let mut search_config = toml_config.build_search_config();
