@@ -604,9 +604,18 @@ pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mu
         if k1 == k2 {
             return "同キー";
         }
-        let f1 = col_to_finger(slot_col(k1, nc));
-        let f2 = col_to_finger(slot_col(k2, nc));
+        let c1 = slot_col(k1, nc);
+        let c2 = slot_col(k2, nc);
+        let f1 = col_to_finger(c1);
+        let f2 = col_to_finger(c2);
         if f1 == f2 {
+            if w.allow_index_roll && matches!((c1, c2), (3, 4) | (4, 3) | (5, 6) | (6, 5)) {
+                let is_outroll = match slot_hand(k1, nc) {
+                    Hand::Left => c2 < c1,
+                    Hand::Right => c2 > c1,
+                };
+                return if is_outroll { "OUT" } else { "IN" };
+            }
             return "同指";
         }
         let h1 = slot_hand(k1, nc);
@@ -614,8 +623,6 @@ pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mu
         if h1 != h2 {
             return "交互";
         }
-        let c1 = slot_col(k1, nc);
-        let c2 = slot_col(k2, nc);
         let is_outroll = match h1 {
             Hand::Left => c2 < c1,
             Hand::Right => c2 > c1,

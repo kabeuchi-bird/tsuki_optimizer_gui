@@ -902,7 +902,14 @@ fn build_initial_2_263(
     let l1_fixed_count = (0..kp.num_chars as CharId)
         .filter(|&c| !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)))
         .count();
-    let l1_free_slots = l1_char_slots - l1_fixed_count;
+    if l1_fixed_count > l1_char_slots {
+        let _ = writeln!(
+            out,
+            "警告: L1固定文字数({})がL1スロット数({})を超えています。可動L1枠は0として扱います。",
+            l1_fixed_count, l1_char_slots
+        );
+    }
+    let l1_free_slots = l1_char_slots.saturating_sub(l1_fixed_count);
 
     let mut movable: Vec<(CharId, f64)> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))

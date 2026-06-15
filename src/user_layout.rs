@@ -144,6 +144,15 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
         slot_used[s as usize] = true;
     }
 
+    if kp.size == crate::layout::KeyboardSize::K3x10SingleShift
+        && cts[crate::chars::TOUTEN_ID as usize] != crate::layout::E_SHIFT_SLOT
+    {
+        return Err(format!(
+            "3x10_single_shift では '、' は row0 col2 (slot {}) に配置してください",
+            crate::layout::E_SHIFT_SLOT
+        ));
+    }
+
     Ok(Layout {
         kp,
         char_to_slot: cts,
