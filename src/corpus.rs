@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::chars::{build_char_to_id, decompose, CharId, MAX_CHARS};
+use crate::yoon::YoonTable;
 
 /// ——————————————————————————————
 /// コーパス統計
@@ -35,6 +36,8 @@ pub struct Corpus {
 pub struct CorpusStats {
     pub total_chars: u64,
     pub skipped_chars: u64,
+    /// 子音に先行されない小書きゃゅょ（てゃ/ふゅ等）でスキップした数（hybrid のみ）
+    pub yoon_skipped: u64,
     pub num_segments: usize,
     pub num_unigrams: usize,
     pub num_bigrams: usize,
@@ -58,8 +61,19 @@ pub struct TrigramEntry {
 
 impl Corpus {
     pub fn from_file(path: &Path) -> std::io::Result<Self> {
+        Self::from_file_with_yoon(path, None)
+    }
+
+    /// 拗音テーブルを指定してファイルからコーパスを構築する（None で既存動作）。
+    pub fn from_file_with_yoon(path: &Path, yoon: Option<&YoonTable>) -> std::io::Result<Self> {
         let text = fs::read_to_string(path)?;
-        Ok(Self::from_str(&text))
+        Ok(Self::from_str_with_yoon(&text, yoon))
+    }
+
+    /// テキスト文字列からコーパスを構築する（既存動作、拗音分解なし）。
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(text: &str) -> Self {
+        Self::from_str_with_yoon(text, None)
     }
 
     /// テキスト文字列からコーパスを構築する。
@@ -68,17 +82,49 @@ impl Corpus {
     /// - 配字されている文字（有声音含む）→ CharId に変換してセグメントに追加
     /// - 改行文字（`\n`, `\r`）         → スキップ
     /// - それ以外の配字外文字           → セグメントを切る
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(text: &str) -> Self {
+    ///
+    /// # 拗音分解（`yoon = Some(table)` のとき）
+    /// - `基底かな + ゃ/ゅ/ょ` を最優先でユニット化 → `[子音CharId, 小書きCharId]` の2トークン
+    /// - 子音に先行されない小書き ゃゅょ（てゃ/ふゅ等）→ セグメントを切り、yoon_skipped を加算
+    pub fn from_str_with_yoon(text: &str, yoon: Option<&YoonTable>) -> Self {
         let map = build_char_to_id();
 
+        let chars: Vec<char> = text.chars().collect();
         let mut segments: Vec<Vec<CharId>> = Vec::new();
         let mut current: Vec<CharId> = Vec::new();
         let mut skipped_chars = 0u64;
+        let mut yoon_skipped = 0u64;
 
-        for c in text.chars() {
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
             if c == '\n' || c == '\r' {
+                i += 1;
                 continue;
+            }
+
+            if let Some(yt) = yoon {
+                // 拗音ユニットの先読み（基底かな + 小書きゃゅょ）
+                if i + 1 < chars.len() && YoonTable::is_shift_char(chars[i + 1]) {
+                    if let Some(cons_id) = yt.lookup_unit(c, chars[i + 1]) {
+                        let small_id = yt
+                            .shift_id(chars[i + 1])
+                            .expect("拗音シフトかなは CharId を持つ");
+                        current.push(cons_id);
+                        current.push(small_id);
+                        i += 2;
+                        continue;
+                    }
+                }
+                // 子音に先行されない小書き ゃゅょ → セグメント区切り＋スキップ
+                if YoonTable::is_shift_char(c) {
+                    if !current.is_empty() {
+                        segments.push(std::mem::take(&mut current));
+                    }
+                    yoon_skipped += 1;
+                    i += 1;
+                    continue;
+                }
             }
 
             let ids = decompose(c, &map);
@@ -90,6 +136,7 @@ impl Corpus {
             } else {
                 current.extend_from_slice(ids.as_slice());
             }
+            i += 1;
         }
         if !current.is_empty() {
             segments.push(current);
@@ -153,6 +200,7 @@ impl Corpus {
         let stats = CorpusStats {
             total_chars,
             skipped_chars,
+            yoon_skipped,
             num_segments: segments.len(),
             num_unigrams: uni_count.iter().filter(|&&c| c > 0).count(),
             num_bigrams: bigrams.len(),
@@ -235,5 +283,84 @@ mod tests {
         // バイグラム隣接リストが空でない
         let has_bigrams = corpus.bigram_adj.iter().any(|v| !v.is_empty());
         assert!(has_bigrams);
+    }
+
+    // ── 拗音分解（hybrid）─────────────────────────
+    fn default_table() -> YoonTable {
+        YoonTable::from_spec(crate::yoon::DEFAULT_CONSONANTS).unwrap()
+    }
+
+    fn has_bigram(corpus: &Corpus, c1: CharId, c2: CharId) -> bool {
+        corpus.bigrams.iter().any(|b| b.c1 == c1 && b.c2 == c2)
+    }
+
+    #[test]
+    fn test_yoon_unit_kya() {
+        // きゃ → [Ky, ゃ]（2トークン、き単独は現れない）
+        let yt = default_table();
+        let map = crate::chars::build_char_to_id();
+        let corpus = Corpus::from_str_with_yoon("きゃ", Some(&yt));
+        let ky = yt.lookup_unit('き', 'ゃ').unwrap();
+        let ya = map[&'ゃ'];
+        assert_eq!(corpus.stats.total_chars, 2);
+        assert!(corpus.unigrams[ky as usize] > 0.0);
+        assert!(corpus.unigrams[ya as usize] > 0.0);
+        assert_eq!(corpus.unigrams[map[&'き'] as usize], 0.0);
+        assert!(has_bigram(&corpus, ky, ya));
+    }
+
+    #[test]
+    fn test_yoon_unit_voiced_and_semivoiced() {
+        // ぎょ → [Gy, ょ]、じゅ → [J, ゅ]、ぴゃ → [Py, ゃ]
+        let yt = default_table();
+        let map = crate::chars::build_char_to_id();
+        for (word, base, small) in [("ぎょ", 'ぎ', 'ょ'), ("じゅ", 'じ', 'ゅ'), ("ぴゃ", 'ぴ', 'ゃ')] {
+            let corpus = Corpus::from_str_with_yoon(word, Some(&yt));
+            let cons = yt.lookup_unit(base, small).unwrap();
+            let small_id = map[&small];
+            assert_eq!(corpus.stats.total_chars, 2, "{}", word);
+            assert!(corpus.unigrams[cons as usize] > 0.0, "{}", word);
+            assert!(has_bigram(&corpus, cons, small_id), "{}", word);
+            // 濁点/半濁点は展開されない（子音が濁りを内包する）
+            assert_eq!(corpus.unigrams[crate::chars::DAKUTEN_ID as usize], 0.0, "{}", word);
+            assert_eq!(corpus.unigrams[crate::chars::HANDAKUTEN_ID as usize], 0.0, "{}", word);
+        }
+    }
+
+    #[test]
+    fn test_yoon_unit_with_trailing() {
+        // きょう → [Ky, ょ, う]（3トークン）
+        let yt = default_table();
+        let map = crate::chars::build_char_to_id();
+        let corpus = Corpus::from_str_with_yoon("きょう", Some(&yt));
+        let ky = yt.lookup_unit('き', 'ょ').unwrap();
+        let yo = map[&'ょ'];
+        let u = map[&'う'];
+        assert_eq!(corpus.stats.total_chars, 3);
+        assert!(has_bigram(&corpus, ky, yo));
+        assert!(has_bigram(&corpus, yo, u));
+    }
+
+    #[test]
+    fn test_yoon_orphan_small_kana_skipped() {
+        // てゃ → 子音に先行されない小書き ゃ でセグメント区切り＋スキップ。て は通常文字。
+        let yt = default_table();
+        let map = crate::chars::build_char_to_id();
+        let corpus = Corpus::from_str_with_yoon("てゃ", Some(&yt));
+        assert_eq!(corpus.stats.yoon_skipped, 1);
+        assert!(corpus.unigrams[map[&'て'] as usize] > 0.0);
+        // ゃ 単独はユニグラムに現れない（スキップ）
+        assert_eq!(corpus.unigrams[map[&'ゃ'] as usize], 0.0);
+    }
+
+    #[test]
+    fn test_yoon_none_matches_plain() {
+        // yoon = None は既存動作と完全一致（きゃ は き + ゃ の2文字）
+        let map = crate::chars::build_char_to_id();
+        let corpus = Corpus::from_str("きゃ");
+        assert_eq!(corpus.stats.total_chars, 2);
+        assert!(corpus.unigrams[map[&'き'] as usize] > 0.0);
+        assert!(corpus.unigrams[map[&'ゃ'] as usize] > 0.0);
+        assert_eq!(corpus.stats.yoon_skipped, 0);
     }
 }
