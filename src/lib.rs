@@ -29,13 +29,16 @@ pub fn write_config_summary(
     weights: &cost::Weights,
     toml_config: &config::Config,
     exclusive_pairs: &[layout::ExclusivePair],
-    yoon_mode: yoon::YoonMode,
 ) {
     let _ = writeln!(out, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " tsuki_optimize v{} 実行設定", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " keyboard_size = {}", config::keyboard_size_str(kp));
-    let _ = writeln!(out, " yoon_mode     = {}", yoon_mode.config_label());
+    let _ = writeln!(
+        out,
+        " yoon_mode     = {}",
+        if kp.yoon { "hybrid" } else { "none" }
+    );
     if kp.yoon {
         let tokens: Vec<&str> = (0..kp.num_consonants)
             .filter_map(|i| yoon::consonant_label(kp.consonant_mask, chars::CONSONANT_FIRST + i))
@@ -52,22 +55,16 @@ pub fn write_config_summary(
     let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
     let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
     let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
-    if kp.yoon {
-        let _ = writeln!(
-            out,
-            " tabu           l1={} l2={} inter={} yoon={}",
-            search_config.tabu_l1,
-            search_config.tabu_l2,
-            search_config.tabu_inter,
-            search_config.tabu_yoon
-        );
+    let yoon_tabu = if kp.yoon {
+        format!(" yoon={}", search_config.tabu_yoon)
     } else {
-        let _ = writeln!(
-            out,
-            " tabu           l1={} l2={} inter={}",
-            search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter
-        );
-    }
+        String::new()
+    };
+    let _ = writeln!(
+        out,
+        " tabu           l1={} l2={} inter={}{}",
+        search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter, yoon_tabu
+    );
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
     let _ = writeln!(
         out,

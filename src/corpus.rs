@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::chars::{build_char_to_id, decompose, CharId, MAX_CHARS};
-use crate::yoon::YoonTable;
+use crate::yoon::{yoon_shift_id, YoonTable};
 
 /// ——————————————————————————————
 /// コーパス統計
@@ -27,6 +27,13 @@ pub struct Corpus {
 
     /// トライグラム隣接リスト
     pub trigram_adj: Vec<Vec<usize>>,
+
+    /// 文字 c を動かしたときにコストが変化しうる文字の集合（ビットマスク）。
+    ///
+    /// c 自身と、c と同じ n-gram に現れる全文字。コーパスから決まりレイアウトに
+    /// 依存しないため、探索開始前に一度だけ構築する。
+    /// スワップ (c1, c2) の dirty マスクは `dirty_mask[c1] | dirty_mask[c2]`。
+    pub dirty_mask: Vec<u128>,
 
     /// コーパス構築時の統計情報
     pub stats: CorpusStats,
@@ -89,30 +96,28 @@ impl Corpus {
     pub fn from_str_with_yoon(text: &str, yoon: Option<&YoonTable>) -> Self {
         let map = build_char_to_id();
 
-        let chars: Vec<char> = text.chars().collect();
         let mut segments: Vec<Vec<CharId>> = Vec::new();
         let mut current: Vec<CharId> = Vec::new();
         let mut skipped_chars = 0u64;
         let mut yoon_skipped = 0u64;
 
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
+        // 1文字先読みするだけなので peekable で足りる（コーパス全体を Vec<char> に
+        // 展開すると原文と同等のメモリを追加で消費してしまう）
+        let mut it = text.chars().peekable();
+        while let Some(c) = it.next() {
             if c == '\n' || c == '\r' {
-                i += 1;
                 continue;
             }
 
             if let Some(yt) = yoon {
                 // 拗音ユニットの先読み（基底かな + 小書きゃゅょ）
-                if i + 1 < chars.len() && YoonTable::is_shift_char(chars[i + 1]) {
-                    if let Some(cons_id) = yt.lookup_unit(c, chars[i + 1]) {
-                        let small_id = yt
-                            .shift_id(chars[i + 1])
-                            .expect("拗音シフトかなは CharId を持つ");
+                if let Some(&next) = it.peek() {
+                    if let Some(cons_id) = yt.lookup_unit(c, next) {
+                        let small_id =
+                            yoon_shift_id(next).expect("拗音シフトかなは CharId を持つ");
                         current.push(cons_id);
                         current.push(small_id);
-                        i += 2;
+                        it.next(); // 小書きかなを消費
                         continue;
                     }
                 }
@@ -122,7 +127,6 @@ impl Corpus {
                         segments.push(std::mem::take(&mut current));
                     }
                     yoon_skipped += 1;
-                    i += 1;
                     continue;
                 }
             }
@@ -136,7 +140,6 @@ impl Corpus {
             } else {
                 current.extend_from_slice(ids.as_slice());
             }
-            i += 1;
         }
         if !current.is_empty() {
             segments.push(current);
@@ -196,6 +199,8 @@ impl Corpus {
 
         let bigram_adj = Self::build_bigram_adj(&bigrams);
         let trigram_adj = Self::build_trigram_adj(&trigrams);
+        let dirty_mask =
+            Self::build_dirty_mask(&bigrams, &trigrams, &bigram_adj, &trigram_adj);
 
         let stats = CorpusStats {
             total_chars,
@@ -213,6 +218,7 @@ impl Corpus {
             trigrams,
             bigram_adj,
             trigram_adj,
+            dirty_mask,
             stats,
         }
     }
@@ -228,8 +234,34 @@ impl Corpus {
             trigrams: vec![],
             bigram_adj: vec![vec![]; MAX_CHARS],
             trigram_adj: vec![vec![]; MAX_CHARS],
+            dirty_mask: vec![0; MAX_CHARS],
             stats: CorpusStats::default(),
         }
+    }
+
+    /// 各文字について「その文字と同じ n-gram に現れる文字」のビットマスクを構築する。
+    ///
+    /// 探索中は毎イテレーション参照されるが内容は不変なので、ここで一度だけ計算する。
+    fn build_dirty_mask(
+        bigrams: &[BigramEntry],
+        trigrams: &[TrigramEntry],
+        bigram_adj: &[Vec<usize>],
+        trigram_adj: &[Vec<usize>],
+    ) -> Vec<u128> {
+        let mut masks = vec![0u128; MAX_CHARS];
+        for (c, mask) in masks.iter_mut().enumerate() {
+            let mut d = 1u128 << c;
+            for &idx in &bigram_adj[c] {
+                let bg = &bigrams[idx];
+                d |= (1u128 << bg.c1) | (1u128 << bg.c2);
+            }
+            for &idx in &trigram_adj[c] {
+                let tg = &trigrams[idx];
+                d |= (1u128 << tg.c1) | (1u128 << tg.c2) | (1u128 << tg.c3);
+            }
+            *mask = d;
+        }
+        masks
     }
 
     fn build_bigram_adj(bigrams: &[BigramEntry]) -> Vec<Vec<usize>> {

@@ -2,11 +2,13 @@
 
 use std::io::Write;
 
-use crate::chars::{CharId, CHAR_LIST, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
+use crate::chars::{
+    CharId, CHAR_LIST, DAKUTEN_ID, HANDAKUTEN_ID, KUTEN_ID, MAX_CHARS, TOUTEN_ID,
+};
 use crate::corpus::Corpus;
 use crate::layout::{
-    col_to_finger, keystrokes_for_slot, slot_after_swap, slot_col, slot_hand, slot_row, Hand,
-    KeyboardParams, Layout, SlotId,
+    col_to_finger, keystrokes_for_slot, layer_of, slot_after_swap, slot_col, slot_hand, slot_row,
+    stroke_count_for_slot, Hand, KeyboardParams, Layer, Layout, SlotId,
 };
 
 /// ——————————————————————————————
@@ -177,7 +179,7 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
     // delta_score() は slot_after_swap() で仮スロットを渡すため追加実装不要
     if c2 == DAKUTEN_ID
         && w.daku_l2_trigger[c1 as usize]
-        && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
+        && layer_of(slot1, w.kp) == Layer::L2
     {
         let nc = w.kp.num_cols;
         let shift_slot = ks1.first();
@@ -188,7 +190,7 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
     // L2配置の半濁音基音（は行）→ ゜ のとき、同様にシフトキー1打鍵分を削減
     if c2 == HANDAKUTEN_ID
         && w.handaku_l2_trigger[c1 as usize]
-        && (slot1 as usize) >= w.kp.num_slots_per_layer as usize
+        && layer_of(slot1, w.kp) == Layer::L2
     {
         let nc = w.kp.num_cols;
         let shift_slot = ks1.first();
@@ -247,14 +249,12 @@ pub fn trigram_cost(
 /// 総合スコア（全コーパスに対して計算、値が小さいほど良い）
 /// ——————————————————————————————
 pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
-    let nc = w.kp.num_chars;
     let mut total = 0.0;
 
     // 1. 打鍵数コスト（最優先）
     // 基底文字 0..nc に続けて拗音面（子音）を集計する。mode=none では拗音区間は
     // 空なので加算順序は不変（スコア完全一致）。
-    for c in (0..nc).chain(w.kp.yoon_char_range()) {
-        let c = c as CharId;
+    for c in w.kp.scored_chars() {
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
@@ -263,8 +263,7 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
     }
 
     // 2. ユニグラム難易度（基礎コスト + 文字内トランジション）
-    for c in (0..nc).chain(w.kp.yoon_char_range()) {
-        let c = c as CharId;
+    for c in w.kp.scored_chars() {
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
@@ -456,19 +455,8 @@ pub fn delta_score(
     delta
 }
 
-/// 打鍵数計算（スロットと文字種から）
-#[inline]
-fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
-    let npl = kp.num_slots_per_layer as usize;
-    let s = slot as usize;
-    if crate::layout::punct_needs_enter(c, kp.size) {
-        2 // シフトキー + Enter
-    } else if s < npl || (kp.yoon && s >= 2 * npl) {
-        1 // Layer 1 文字 / 拗音面の子音（ともに1打）
-    } else {
-        2 // Layer 2
-    }
-}
+// 打鍵数計算は layout::stroke_count_for_slot が唯一の実装
+// （Layout::char_stroke_count と共有し、全体スコアと差分スコアの乖離を防ぐ）
 
 /// スコア内訳の構造体（GUI 表示用）
 #[derive(Clone, Debug, Default)]
@@ -486,7 +474,6 @@ pub struct ScoreBreakdown {
 
 /// スコア内訳を構造体として返す
 pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> ScoreBreakdown {
-    let nc = w.kp.num_chars;
     let mut stroke_cost = 0.0;
     let mut uni_cost = 0.0;
     let mut bi_cost = 0.0;
@@ -495,8 +482,7 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
     let mut l1_coverage = 0.0;
     let mut finger_load = [0.0f64; 8];
 
-    for c in (0..nc).chain(w.kp.yoon_char_range()) {
-        let c = c as CharId;
+    for c in w.kp.scored_chars() {
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
@@ -690,14 +676,14 @@ pub fn compute_shift_omit(layout: &Layout, corpus: &Corpus, weights: &Weights) -
     let kp = layout.kp;
     let mut omit = [0.0f64; 2];
     for c in 0..kp.num_chars as CharId {
-        if c >= VOID_CHAR_FIRST {
+        if !crate::chars::is_base_kana(c) {
             continue;
         }
         let slot = layout.char_to_slot[c as usize];
-        if (slot as usize) < kp.num_slots_per_layer as usize {
+        if layer_of(slot, kp) != Layer::L2 {
             continue;
         }
-        let physical = slot - kp.num_slots_per_layer;
+        let physical = crate::layout::physical_of(slot, kp);
         let shift_idx = if slot_hand(physical, kp.num_cols) == Hand::Left {
             1
         } else {
@@ -714,7 +700,7 @@ pub fn compute_shift_omit(layout: &Layout, corpus: &Corpus, weights: &Weights) -
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::corpus::Corpus;
     use crate::layout::{KeyboardParams, Layout};
@@ -756,12 +742,19 @@ mod tests {
         assert_eq!(key_pair_cost(0, 0, &w), w.same_key_penalty);
     }
 
-    fn verify_all_pairs(layout: &Layout, corpus: &Corpus, weights: &Weights) {
+    /// 全ペアについて delta_score が「スワップして全体再スコア」と一致することを検証する。
+    ///
+    /// 対象文字は kp から導出する（基底かな + 拗音面）。mode=none では拗音区間が
+    /// 空なので従来と同一。差分評価と全体スコアの乖離を検出する中核のテスト補助で、
+    /// search.rs の hybrid テストからも呼ばれる。
+    pub(crate) fn verify_all_pairs(layout: &Layout, corpus: &Corpus, weights: &Weights) {
         let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
         let score_before = score(layout, corpus, weights);
 
-        let chars: Vec<crate::chars::CharId> = (0..layout.kp.num_chars as crate::chars::CharId)
-            .filter(|&c| c < crate::chars::VOID_CHAR_FIRST)
+        let chars: Vec<CharId> = layout
+            .kp
+            .scored_chars()
+            .filter(|&c| crate::chars::is_base_kana(c) || layout.kp.yoon_char_range().contains(&(c as usize)))
             .collect();
 
         for i in 0..chars.len() {

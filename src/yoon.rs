@@ -46,7 +46,7 @@ impl YoonMode {
 
 use std::collections::HashMap;
 
-use crate::chars::{build_char_to_id, CharId, CONSONANT_FIRST};
+use crate::chars::{CharId, CONSONANT_FIRST};
 
 /// 拗音シフトキー（後置シフト）の小書きかな。ゃ ゅ ょ の3キーのみ。
 pub const YOON_SHIFT_CHARS: [char; 3] = ['ゃ', 'ゅ', 'ょ'];
@@ -80,25 +80,15 @@ const CONSONANT_REGISTRY: [ConsonantDef; 12] = [
     ConsonantDef { token: "Ry", base: 'り' },
 ];
 
-/// 有効化された子音1つ。
-#[derive(Clone, Copy, Debug)]
-pub struct ActiveConsonant {
-    /// 表示・設定用トークン（例 "Ky"）。
-    pub token: &'static str,
-    /// 分解の基底かな（例 'き'）。
-    pub base: char,
-    /// 割り当てられた CharId（CONSONANT_FIRST 以上）。
-    pub id: CharId,
-}
-
-/// 拗音方式の子音テーブル。有効子音と、原文分解用の (基底かな, 小書きかな) → 子音CharId マップを保持する。
+/// 拗音方式の子音テーブル。
+///
+/// 有効子音の集合は `registry_mask`（レジストリのビットマスク）が唯一の表現で、
+/// CharId はレジストリ順に `CONSONANT_FIRST` から詰めて採番される。
+/// `unit_map` は分解用の 基底かな → 子音CharId の逆引き。
 #[derive(Clone, Debug)]
 pub struct YoonTable {
-    consonants: Vec<ActiveConsonant>,
-    /// (base_char, small_char) → 子音 CharId
-    unit_map: HashMap<(char, char), CharId>,
-    /// 小書きかな char → CharId（ゃゅょ）
-    shift_ids: HashMap<char, CharId>,
+    /// 基底かな（き/ぎ/し…）→ 子音 CharId
+    unit_map: HashMap<char, CharId>,
     /// レジストリの有効ビットマスク（bit i = CONSONANT_REGISTRY[i] が有効）
     registry_mask: u16,
 }
@@ -109,96 +99,58 @@ impl YoonTable {
     /// トークンは最長一致で分割する（2文字トークン優先、1文字は "J" のみ）。
     /// 未知トークン・重複・v1非対応の外来音は Err を返す。
     pub fn from_spec(spec: &str) -> Result<Self, String> {
-        let chars: Vec<char> = spec.chars().collect();
-        let mut active_tokens: Vec<&'static str> = Vec::new();
-        let mut i = 0;
-        while i < chars.len() {
-            let two: Option<String> = if i + 1 < chars.len() {
-                Some(format!("{}{}", chars[i], chars[i + 1]))
-            } else {
-                None
-            };
-            let one = chars[i].to_string();
-
-            let matched = two
-                .as_deref()
-                .and_then(registry_token)
-                .map(|t| (t, 2))
-                .or_else(|| registry_token(&one).map(|t| (t, 1)));
-
-            match matched {
-                Some((tok, adv)) => {
-                    if active_tokens.contains(&tok) {
-                        return Err(format!("子音セットにトークン '{}' が重複しています", tok));
+        let mut registry_mask: u16 = 0;
+        let mut rest = spec;
+        while !rest.is_empty() {
+            // 長いトークンを優先して前方一致（"JCh" → J + Ch）
+            let hit = CONSONANT_REGISTRY
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| rest.starts_with(d.token))
+                .max_by_key(|(_, d)| d.token.len());
+            match hit {
+                Some((ri, def)) => {
+                    let bit = 1u16 << ri;
+                    if registry_mask & bit != 0 {
+                        return Err(format!(
+                            "子音セットにトークン '{}' が重複しています",
+                            def.token
+                        ));
                     }
-                    active_tokens.push(tok);
-                    i += adv;
+                    registry_mask |= bit;
+                    rest = &rest[def.token.len()..];
                 }
                 None => {
                     return Err(format!(
-                        "子音セットの解釈に失敗しました（位置 {} 付近: '{}'）。\
+                        "子音セットの解釈に失敗しました（'{}' 付近）。\
                          有効なトークン: Ky Gy Sh J Ch Dy Ny Hy By Py My Ry。\
                          外来音 F/V/W/T/D は v1 では非対応です。",
-                        i, chars[i]
+                        rest
                     ));
                 }
             }
         }
-
-        Self::from_tokens(&active_tokens)
+        Self::from_mask(registry_mask)
     }
 
-    /// 正準順（レジストリ順）に子音 CharId を詰めて割り当ててテーブルを構築する。
-    fn from_tokens(active_tokens: &[&str]) -> Result<Self, String> {
-        let map = build_char_to_id();
-        let mut consonants = Vec::new();
-        let mut unit_map = HashMap::new();
-        let mut next_id = CONSONANT_FIRST;
-        let mut registry_mask: u16 = 0;
-
-        // レジストリ順に走査 → 有効なものだけ dense に採番（spec の並び順に依存しない）
-        for (ri, def) in CONSONANT_REGISTRY.iter().enumerate() {
-            if !active_tokens.contains(&def.token) {
-                continue;
-            }
-            registry_mask |= 1 << ri;
-            let id = next_id;
-            next_id += 1;
-            consonants.push(ActiveConsonant {
-                token: def.token,
-                base: def.base,
-                id,
-            });
-            for &small in &YOON_SHIFT_CHARS {
-                unit_map.insert((def.base, small), id);
-            }
-        }
-
-        if consonants.is_empty() {
+    /// レジストリマスクからテーブルを構築する（CharId はレジストリ順に dense 採番）。
+    fn from_mask(registry_mask: u16) -> Result<Self, String> {
+        if registry_mask == 0 {
             return Err("子音セットが空です".to_string());
         }
-
-        let shift_ids: HashMap<char, CharId> = YOON_SHIFT_CHARS
-            .iter()
-            .map(|&c| {
-                let id = *map
-                    .get(&c)
-                    .expect("拗音シフトかな（ゃゅょ）は CHAR_LIST に存在する");
-                (c, id)
-            })
-            .collect();
-
+        let mut unit_map = HashMap::new();
+        let mut next_id = CONSONANT_FIRST;
+        for (ri, def) in CONSONANT_REGISTRY.iter().enumerate() {
+            if registry_mask & (1 << ri) == 0 {
+                continue;
+            }
+            unit_map.insert(def.base, next_id);
+            next_id += 1;
+        }
         Ok(YoonTable {
-            consonants,
             unit_map,
-            shift_ids,
             registry_mask,
         })
-    }
-
-    /// 有効子音のスライス（CharId 昇順 = レジストリ順）。
-    pub fn consonants(&self) -> &[ActiveConsonant] {
-        &self.consonants
     }
 
     /// レジストリ有効ビットマスク（KeyboardParams に載せて表示ラベル復元に使う）。
@@ -208,17 +160,18 @@ impl YoonTable {
 
     /// 有効子音数。
     pub fn num_consonants(&self) -> usize {
-        self.consonants.len()
+        self.registry_mask.count_ones() as usize
     }
 
     /// (基底かな, 小書きかな) が拗音ユニットなら子音 CharId を返す。
+    ///
+    /// 子音はゃゅょのどれと組んでも同じなので、判定は `small` が拗音シフトかどうかと
+    /// `base` が有効子音の基底かどうかの2点。
     pub fn lookup_unit(&self, base: char, small: char) -> Option<CharId> {
-        self.unit_map.get(&(base, small)).copied()
-    }
-
-    /// 小書きかな（ゃゅょ）の CharId を返す。
-    pub fn shift_id(&self, small: char) -> Option<CharId> {
-        self.shift_ids.get(&small).copied()
+        if !Self::is_shift_char(small) {
+            return None;
+        }
+        self.unit_map.get(&base).copied()
     }
 
     /// c が拗音シフトかな（ゃゅょ）か。
@@ -227,12 +180,67 @@ impl YoonTable {
     }
 }
 
-/// トークン文字列がレジストリに存在すれば正準の &'static str を返す。
-fn registry_token(tok: &str) -> Option<&'static str> {
-    CONSONANT_REGISTRY
+/// 拗音シフトかな（ゃゅょ）の CharId を返す。
+///
+/// `YOON_SHIFT_CHARS` と `chars::YOON_SHIFT_IDS` は同順であることが前提。
+pub fn yoon_shift_id(c: char) -> Option<CharId> {
+    YOON_SHIFT_CHARS
         .iter()
-        .find(|d| d.token == tok)
-        .map(|d| d.token)
+        .position(|&s| s == c)
+        .map(|i| crate::chars::YOON_SHIFT_IDS[i])
+}
+
+/// 拗音方式の初期化結果。
+///
+/// hybrid を有効にするには「拗音面つき KeyboardParams」「同じテーブルで分解した
+/// コーパス」「ゃゅょ を含む l1_only」の3点が揃っている必要があり、どれか1つでも
+/// 欠けると無言で壊れる（子音の頻度が全て0になる等）。それらを取り違えられない
+/// よう、この構造体が一括で提供する。
+pub struct YoonSetup {
+    /// 拗音面を反映した KeyboardParams（none ならそのまま）
+    pub kp: crate::layout::KeyboardParams,
+    /// 子音テーブル（none なら None）。`Corpus::from_file_with_yoon` に渡すこと。
+    pub table: Option<YoonTable>,
+    pub mode: YoonMode,
+}
+
+impl YoonSetup {
+    /// 拗音方式を解決し、KeyboardParams に拗音面を反映する。
+    ///
+    /// `mode` は CLI/TOML で解決済みの値、`consonants` は設定の子音セット
+    /// （None ならデフォルト11種）。CLI と GUI の両方がこの1関数を呼ぶ。
+    pub fn resolve(
+        kp: crate::layout::KeyboardParams,
+        mode: YoonMode,
+        consonants: Option<&str>,
+    ) -> Result<Self, String> {
+        if !mode.is_hybrid() {
+            return Ok(YoonSetup {
+                kp,
+                table: None,
+                mode,
+            });
+        }
+        let table = YoonTable::from_spec(consonants.unwrap_or(DEFAULT_CONSONANTS))
+            .map_err(|e| format!("子音セットが不正です: {e}"))?;
+        let kp = kp
+            .with_yoon(table.registry_mask())
+            .map_err(|e| format!("拗音面を構成できません: {e}"))?;
+        Ok(YoonSetup {
+            kp,
+            table: Some(table),
+            mode,
+        })
+    }
+
+    /// 拗音シフト ゃゅょ を L1 固定集合に加える（hybrid のみ）。
+    ///
+    /// ゃゅょ が1打で打てなければ方式が成立しないため、hybrid では必須。
+    pub fn extend_l1_only(&self, l1_only: &mut std::collections::HashSet<CharId>) {
+        if self.mode.is_hybrid() {
+            l1_only.extend(crate::chars::YOON_SHIFT_IDS);
+        }
+    }
 }
 
 /// レジストリマスクと子音 CharId から表示ラベル（"Ky" 等）を復元する。
@@ -273,8 +281,10 @@ mod tests {
         let yt = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
         assert_eq!(yt.num_consonants(), 11); // 必須11種（Dy除く）
         // CONSONANT_FIRST から連番、レジストリ順
-        assert_eq!(yt.consonants()[0].token, "Ky");
-        assert_eq!(yt.consonants()[0].id, CONSONANT_FIRST);
+        assert_eq!(
+            consonant_label(yt.registry_mask(), CONSONANT_FIRST),
+            Some("Ky")
+        );
         assert_eq!(yt.lookup_unit('き', 'ゃ'), Some(CONSONANT_FIRST));
         assert_eq!(yt.lookup_unit('き', 'ゅ'), Some(CONSONANT_FIRST));
         assert_eq!(yt.lookup_unit('き', 'ょ'), Some(CONSONANT_FIRST));
