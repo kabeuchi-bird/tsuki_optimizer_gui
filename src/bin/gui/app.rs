@@ -288,6 +288,7 @@ impl App {
                 &weights,
                 &toml_config,
                 &exclusive_pairs,
+                tsuki_optimize::yoon::YoonMode::None,
             );
 
             let initial = search::build_initial_layout(

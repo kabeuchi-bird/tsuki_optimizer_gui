@@ -75,8 +75,8 @@ const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
 const BITS_PER_WORD: usize = u64::BITS as usize;
 const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
-// dirty mask が u64 に収まることの静的検証
-const _: () = assert!(MAX_CHARS <= 64, "MAX_CHARS must be <= 64 for u64 dirty mask");
+// dirty mask が u128 に収まることの静的検証
+const _: () = assert!(MAX_CHARS <= 128, "MAX_CHARS must be <= 128 for u128 dirty mask");
 
 #[inline]
 fn pair_index(a: usize, b: usize) -> usize {
@@ -154,7 +154,7 @@ impl DeltaPairCache {
         d
     }
 
-    fn invalidate_dirty(&mut self, dirty: u64) {
+    fn invalidate_dirty(&mut self, dirty: u128) {
         let mut bits = dirty;
         while bits != 0 {
             let c = bits.trailing_zeros() as usize;
@@ -173,16 +173,16 @@ impl DeltaPairCache {
     }
 }
 
-fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u64 {
-    let mut dirty = (1u64 << c1) | (1u64 << c2);
+fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u128 {
+    let mut dirty = (1u128 << c1) | (1u128 << c2);
     for &c in &[c1, c2] {
         for &idx in &corpus.bigram_adj[c as usize] {
             let bg = &corpus.bigrams[idx];
-            dirty |= (1u64 << bg.c1) | (1u64 << bg.c2);
+            dirty |= (1u128 << bg.c1) | (1u128 << bg.c2);
         }
         for &idx in &corpus.trigram_adj[c as usize] {
             let tg = &corpus.trigrams[idx];
-            dirty |= (1u64 << tg.c1) | (1u64 << tg.c2) | (1u64 << tg.c3);
+            dirty |= (1u128 << tg.c1) | (1u128 << tg.c2) | (1u128 << tg.c3);
         }
     }
     dirty

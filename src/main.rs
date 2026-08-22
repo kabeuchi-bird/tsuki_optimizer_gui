@@ -20,6 +20,8 @@
 //   --log-interval  <n>     ログ間隔                 (toml: run.log_interval)
 //   --keyboard-size <s>     キーボードサイズ         (toml: run.keyboard_size)
 //                           "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
+//   --yoon          <s>     拗音方式                 (toml: yoon.mode)
+//                           "none"（デフォルト）/ "hybrid"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
 use rand::rngs::SmallRng;
@@ -129,6 +131,13 @@ fn main() {
         keyboard_params_from_str(ks)
     } else {
         toml_config.build_keyboard_params()
+    };
+
+    // ── 拗音方式決定（CLI > TOML > デフォルト）──
+    // CLIの --yoon が TOML の yoon.mode を上書きする
+    let yoon_mode = match cli.get("--yoon") {
+        Some(s) => tsuki_optimize::yoon::YoonMode::from_config_str(s),
+        None => toml_config.build_yoon_mode(),
     };
 
     // ── 排他配置ペア制約 ──────────────────────────
@@ -243,6 +252,7 @@ fn main() {
         &weights,
         &toml_config,
         &exclusive_pairs,
+        yoon_mode,
     );
 
     // ── 初期解生成 ───────────────────────────────

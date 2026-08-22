@@ -8,6 +8,7 @@ use crate::chars::{self, CharId, MAX_CHARS};
 use crate::cost::Weights;
 use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
 use crate::search::{InitialLayoutMode, SearchConfig};
+use crate::yoon::YoonMode;
 
 // ──────────────────────────────────────
 // TOMLファイルのトップレベル構造
@@ -23,6 +24,8 @@ pub struct Config {
     pub slot_difficulty: SlotDifficultyConfig,
     #[serde(default)]
     pub constraints: ConstraintsConfig,
+    #[serde(default)]
+    pub yoon: YoonConfig,
 }
 
 // ──────────────────────────────────────
@@ -103,6 +106,14 @@ impl Config {
         match self.run.keyboard_size.as_deref() {
             Some(s) => keyboard_params_from_str(s),
             None => KeyboardParams::k3x10(),
+        }
+    }
+
+    /// yoon.mode 設定から YoonMode を生成する（未指定は None）
+    pub fn build_yoon_mode(&self) -> YoonMode {
+        match self.yoon.mode.as_deref() {
+            Some(s) => YoonMode::from_config_str(s),
+            None => YoonMode::None,
         }
     }
 
@@ -200,6 +211,19 @@ pub struct ExclusivePairConfig {
     pub group_a: String,
     /// 制約グループB（かな文字列、例: "きしちにひみり"）
     pub group_b: String,
+}
+
+// ──────────────────────────────────────
+// [yoon] セクション（ハイブリッド拗音方式）
+// ──────────────────────────────────────
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct YoonConfig {
+    /// 拗音方式: "none"（デフォルト・既存動作）/ "hybrid"
+    pub mode: Option<String>,
+    /// 子音セット（トークン連結、例: "KyGyShJChNyHyByPyMyRy"）。
+    /// 省略時は必須11種。後続ステージで解釈される。
+    pub consonants: Option<String>,
 }
 
 // 濁音になりうる音すべて ＋ 濁点

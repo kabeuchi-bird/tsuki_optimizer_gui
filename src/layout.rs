@@ -7,8 +7,10 @@ use crate::chars::{CharId, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
 
 pub type SlotId = u8;
 
-/// スロット配列の上限サイズ（3x11: 66スロット）
-pub const MAX_SLOTS: usize = 66;
+/// スロット配列の上限サイズ。
+/// 3層構成（L1 / L2 / 拗音面）の 3x11: 33スロット × 3層 = 99スロット。
+/// `mode = "none"` では 2層分（60 or 66）のみ使用する。
+pub const MAX_SLOTS: usize = 99;
 
 /// シフトキースロットのセンチネル値（slot_to_char でシフトキー位置に使用）
 pub const SHIFT_SLOT_SENTINEL: CharId = u8::MAX;

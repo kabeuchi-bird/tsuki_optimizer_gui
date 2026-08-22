@@ -198,10 +198,10 @@ impl Corpus {
     fn build_trigram_adj(trigrams: &[TrigramEntry]) -> Vec<Vec<usize>> {
         let mut adj = vec![vec![]; MAX_CHARS];
         for (idx, tg) in trigrams.iter().enumerate() {
-            // CharId < 64 なので u64 ビットマスクで重複排除
-            let mut seen: u64 = 0;
+            // CharId < 128 なので u128 ビットマスクで重複排除
+            let mut seen: u128 = 0;
             for &c in &[tg.c1, tg.c2, tg.c3] {
-                let bit = 1u64 << c;
+                let bit = 1u128 << c;
                 if seen & bit == 0 {
                     adj[c as usize].push(idx);
                     seen |= bit;

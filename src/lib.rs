@@ -9,6 +9,7 @@ pub mod cost;
 pub mod layout;
 pub mod search;
 pub mod user_layout;
+pub mod yoon;
 
 /// ローカルタイムのタイムスタンプ文字列（YYMMDD_HHMMSS）を生成する
 pub fn local_timestamp() -> String {
@@ -28,11 +29,13 @@ pub fn write_config_summary(
     weights: &cost::Weights,
     toml_config: &config::Config,
     exclusive_pairs: &[layout::ExclusivePair],
+    yoon_mode: yoon::YoonMode,
 ) {
     let _ = writeln!(out, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " tsuki_optimize v{} 実行設定", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " keyboard_size = {}", config::keyboard_size_str(kp));
+    let _ = writeln!(out, " yoon_mode     = {}", yoon_mode.config_label());
     let _ = writeln!(out, " corpus        = {}", corpus_path);
     let _ = writeln!(out, " seed          = {}", seed);
     let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
