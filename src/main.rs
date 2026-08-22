@@ -160,7 +160,7 @@ fn main() {
     };
     let kp = match &yoon_table {
         Some(t) => match kp.with_yoon(t.num_consonants()) {
-            Ok(k) => k,
+            Ok(k) => k.with_consonant_labels(t.registry_mask()),
             Err(e) => {
                 eprintln!("エラー: 拗音面を構成できません: {}", e);
                 std::process::exit(1);

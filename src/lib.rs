@@ -36,16 +36,38 @@ pub fn write_config_summary(
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " keyboard_size = {}", config::keyboard_size_str(kp));
     let _ = writeln!(out, " yoon_mode     = {}", yoon_mode.config_label());
+    if kp.yoon {
+        let tokens: Vec<&str> = (0..kp.num_consonants)
+            .filter_map(|i| yoon::consonant_label(kp.consonant_mask, chars::CONSONANT_FIRST + i))
+            .collect();
+        let _ = writeln!(
+            out,
+            " consonants    = {} 種 [{}]",
+            kp.num_consonants,
+            tokens.join(" ")
+        );
+    }
     let _ = writeln!(out, " corpus        = {}", corpus_path);
     let _ = writeln!(out, " seed          = {}", seed);
     let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
     let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
     let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
-    let _ = writeln!(
-        out,
-        " tabu           l1={} l2={} inter={}",
-        search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter
-    );
+    if kp.yoon {
+        let _ = writeln!(
+            out,
+            " tabu           l1={} l2={} inter={} yoon={}",
+            search_config.tabu_l1,
+            search_config.tabu_l2,
+            search_config.tabu_inter,
+            search_config.tabu_yoon
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            " tabu           l1={} l2={} inter={}",
+            search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter
+        );
+    }
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
     let _ = writeln!(
         out,

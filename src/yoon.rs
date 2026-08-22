@@ -99,6 +99,8 @@ pub struct YoonTable {
     unit_map: HashMap<(char, char), CharId>,
     /// 小書きかな char → CharId（ゃゅょ）
     shift_ids: HashMap<char, CharId>,
+    /// レジストリの有効ビットマスク（bit i = CONSONANT_REGISTRY[i] が有効）
+    registry_mask: u16,
 }
 
 impl YoonTable {
@@ -152,12 +154,14 @@ impl YoonTable {
         let mut consonants = Vec::new();
         let mut unit_map = HashMap::new();
         let mut next_id = CONSONANT_FIRST;
+        let mut registry_mask: u16 = 0;
 
         // レジストリ順に走査 → 有効なものだけ dense に採番（spec の並び順に依存しない）
-        for def in &CONSONANT_REGISTRY {
+        for (ri, def) in CONSONANT_REGISTRY.iter().enumerate() {
             if !active_tokens.contains(&def.token) {
                 continue;
             }
+            registry_mask |= 1 << ri;
             let id = next_id;
             next_id += 1;
             consonants.push(ActiveConsonant {
@@ -188,12 +192,18 @@ impl YoonTable {
             consonants,
             unit_map,
             shift_ids,
+            registry_mask,
         })
     }
 
     /// 有効子音のスライス（CharId 昇順 = レジストリ順）。
     pub fn consonants(&self) -> &[ActiveConsonant] {
         &self.consonants
+    }
+
+    /// レジストリ有効ビットマスク（KeyboardParams に載せて表示ラベル復元に使う）。
+    pub fn registry_mask(&self) -> u16 {
+        self.registry_mask
     }
 
     /// 有効子音数。
@@ -223,6 +233,26 @@ fn registry_token(tok: &str) -> Option<&'static str> {
         .iter()
         .find(|d| d.token == tok)
         .map(|d| d.token)
+}
+
+/// レジストリマスクと子音 CharId から表示ラベル（"Ky" 等）を復元する。
+///
+/// 子音 CharId は CONSONANT_FIRST から有効子音（レジストリ順）に dense 採番されるので、
+/// `id - CONSONANT_FIRST` 番目に立っているビットが対応するレジストリ項目。
+pub fn consonant_label(registry_mask: u16, id: CharId) -> Option<&'static str> {
+    if id < CONSONANT_FIRST {
+        return None;
+    }
+    let mut rank = (id - CONSONANT_FIRST) as u32;
+    for (ri, def) in CONSONANT_REGISTRY.iter().enumerate() {
+        if registry_mask & (1 << ri) != 0 {
+            if rank == 0 {
+                return Some(def.token);
+            }
+            rank -= 1;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

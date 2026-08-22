@@ -62,6 +62,8 @@ pub struct KeyboardParams {
     /// 拗音面の void 数（子音で埋まらない使用可能スロットの数）。
     /// CharId は [CONSONANT_FIRST+num_consonants, +num_yoon_void)。
     pub num_yoon_void: u8,
+    /// 子音レジストリの有効ビットマスク（表示ラベル "Ky" 等の復元用）。
+    pub consonant_mask: u16,
 }
 
 impl KeyboardParams {
@@ -78,6 +80,7 @@ impl KeyboardParams {
             yoon: false,
             num_consonants: 0,
             num_yoon_void: 0,
+            consonant_mask: 0,
         }
     }
 
@@ -98,6 +101,7 @@ impl KeyboardParams {
             yoon: false,
             num_consonants: 0,
             num_yoon_void: 0,
+            consonant_mask: 0,
         }
     }
 
@@ -117,6 +121,7 @@ impl KeyboardParams {
             yoon: false,
             num_consonants: 0,
             num_yoon_void: 0,
+            consonant_mask: 0,
         }
     }
 
@@ -155,7 +160,15 @@ impl KeyboardParams {
         self.num_consonants = num_consonants as u8;
         self.num_yoon_void = (npl - num_consonants) as u8;
         self.num_slots = npl * 3;
+        // 既定は先頭 num_consonants ビット（実際の子音セットは with_consonant_labels で上書き）
+        self.consonant_mask = ((1u32 << num_consonants.min(16)) - 1) as u16;
         Ok(self)
+    }
+
+    /// 表示ラベル復元用の子音レジストリマスクを設定する（YoonTable::registry_mask を渡す）。
+    pub fn with_consonant_labels(mut self, mask: u16) -> Self {
+        self.consonant_mask = mask;
+        self
     }
 
     /// 拗音面の文字数（子音 + void）。
@@ -490,6 +503,21 @@ impl Layout {
                 );
             }
             let _ = writeln!(out);
+        }
+        if self.kp.yoon {
+            // 拗音面（子音は "Ky" 等のトークン、void は ・）
+            let _ = writeln!(out, "【拗音面】（子音 + 拗音シフト ゃゅょ で1モーラ）");
+            for row in 0u8..3 {
+                let _ = write!(out, "  ");
+                for col in 0..nc {
+                    let slot = 2 * npl + (row as usize) * nc + col;
+                    let c = self.slot_to_char[slot];
+                    let label = crate::yoon::consonant_label(self.kp.consonant_mask, c)
+                        .unwrap_or("・");
+                    let _ = write!(out, "{:<3}", label);
+                }
+                let _ = writeln!(out);
+            }
         }
     }
 }

@@ -1098,6 +1098,16 @@ fn build_initial_user_defined(
     use crate::user_layout::{parse_user_layout, UserLayoutFile, USER_LAYOUT_PATH};
     use std::path::Path;
 
+    // hybrid: initial_layout.toml の layer_yoon（拗音面のユーザー定義）は v1 未対応。
+    // 拗音面を含む決定的初期解（2-263）を使用する。
+    if kp.yoon {
+        let _ = writeln!(
+            out,
+            "注意: user-defined 初期配列は hybrid 拗音面に未対応です → 2-263 を使用します"
+        );
+        return build_initial_2_263(ctx, kp, out);
+    }
+
     let path = Path::new(USER_LAYOUT_PATH);
 
     let user_file = match UserLayoutFile::from_file(path) {
