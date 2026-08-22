@@ -251,7 +251,10 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
     let mut total = 0.0;
 
     // 1. 打鍵数コスト（最優先）
-    for c in 0..nc as CharId {
+    // 基底文字 0..nc に続けて拗音面（子音）を集計する。mode=none では拗音区間は
+    // 空なので加算順序は不変（スコア完全一致）。
+    for c in (0..nc).chain(w.kp.yoon_char_range()) {
+        let c = c as CharId;
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
@@ -260,7 +263,8 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
     }
 
     // 2. ユニグラム難易度（基礎コスト + 文字内トランジション）
-    for c in 0..nc as CharId {
+    for c in (0..nc).chain(w.kp.yoon_char_range()) {
+        let c = c as CharId;
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
@@ -455,12 +459,14 @@ pub fn delta_score(
 /// 打鍵数計算（スロットと文字種から）
 #[inline]
 fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
+    let npl = kp.num_slots_per_layer as usize;
+    let s = slot as usize;
     if crate::layout::punct_needs_enter(c, kp.size) {
         2 // シフトキー + Enter
-    } else if (slot as usize) < kp.num_slots_per_layer as usize {
-        1
+    } else if s < npl || (kp.yoon && s >= 2 * npl) {
+        1 // Layer 1 文字 / 拗音面の子音（ともに1打）
     } else {
-        2
+        2 // Layer 2
     }
 }
 
@@ -489,7 +495,8 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
     let mut l1_coverage = 0.0;
     let mut finger_load = [0.0f64; 8];
 
-    for c in 0..nc as CharId {
+    for c in (0..nc).chain(w.kp.yoon_char_range()) {
+        let c = c as CharId;
         let freq = corpus.unigrams[c as usize];
         if freq == 0.0 {
             continue;
