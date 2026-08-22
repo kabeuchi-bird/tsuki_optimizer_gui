@@ -70,6 +70,12 @@ pub const KUTEN_ID: CharId = 17;
 pub const DAKUTEN_ID: CharId = 18;
 /// 半濁点「゜」のCharId（L1固定・L1内移動可）
 pub const HANDAKUTEN_ID: CharId = 29;
+/// 拗音シフト「ゃ」のCharId（hybrid では L1固定・L1内移動可）
+pub const YA_ID: CharId = 54;
+/// 拗音シフト「ゅ」のCharId（hybrid では L1固定・L1内移動可）
+pub const YU_ID: CharId = 53;
+/// 拗音シフト「ょ」のCharId（hybrid では L1固定・L1内移動可）
+pub const YO_ID: CharId = 4;
 /// L1/L2 void文字の最初のID（62, 63 は空きスロット代替）
 pub const VOID_CHAR_FIRST: CharId = 62;
 /// 拗音面の子音（仮想文字）の最初のID。[64..96) を予約。

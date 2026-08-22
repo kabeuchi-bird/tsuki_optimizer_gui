@@ -131,28 +131,29 @@ impl KeyboardParams {
 
     /// 拗音面を有効化した KeyboardParams を返す。
     ///
-    /// 拗音面（第3層）のスロット構成:
-    ///   使用可能スロット = num_slots_per_layer − 禁止スロット数
-    ///   禁止スロット数   = 3（ゃゅょの物理位置）+ シフトキー数
-    ///   void 数          = 使用可能スロット − 子音数
+    /// 拗音面（第3層）のスロットは全て文字（子音 or void）を持ち、センチネルは無い。
+    /// 子音を置けない物理位置は「同一物理キー排他」制約で void に固定される。
+    /// 内訳: シフトキー位置（前置シフトと衝突）が num_shift_keys 個、ゃゅょ の物理位置
+    /// （自己参照 [TT] を回避）が 3 個。
+    /// よって子音の最大数 = num_slots_per_layer − num_shift_keys − 3、
+    /// void 数 = num_slots_per_layer − 子音数。
     ///
-    /// 子音数が使用可能スロットを超える場合は Err を返す。
+    /// 子音数が上限を超える場合は Err を返す。
     pub fn with_yoon(mut self, num_consonants: usize) -> Result<Self, String> {
         let npl = self.num_slots_per_layer as usize;
-        let forbidden = 3 + self.num_shift_keys();
-        let usable = npl.checked_sub(forbidden).ok_or_else(|| {
-            format!("拗音面の使用可能スロットが不足しています（層スロット {npl} < 禁止 {forbidden}）")
+        let reserved = self.num_shift_keys() + 3;
+        let max_consonants = npl.checked_sub(reserved).ok_or_else(|| {
+            format!("拗音面のスロットが不足しています（層スロット {npl} < 予約 {reserved}）")
         })?;
-        if num_consonants > usable {
+        if num_consonants > max_consonants {
             return Err(format!(
-                "子音数({})が拗音面の使用可能スロット数({})を超えています",
-                num_consonants, usable
+                "子音数({})が拗音面の上限({})を超えています",
+                num_consonants, max_consonants
             ));
         }
-        let num_yoon_void = usable - num_consonants;
         self.yoon = true;
         self.num_consonants = num_consonants as u8;
-        self.num_yoon_void = num_yoon_void as u8;
+        self.num_yoon_void = (npl - num_consonants) as u8;
         self.num_slots = npl * 3;
         Ok(self)
     }
@@ -596,13 +597,64 @@ fn pair_violates_after_swap(
     pairs.iter().any(|p| p.violates(l1_c, l2_c))
 }
 
-/// スワップ (c1↔c2) が排他ペア制約に違反するか（影響する最大2スロット列を確認）
+/// c が拗音シフトかな（ゃゅょ）の CharId か。
+#[inline]
+pub fn is_yoon_shift_id(c: CharId) -> bool {
+    c == crate::chars::YA_ID || c == crate::chars::YU_ID || c == crate::chars::YO_ID
+}
+
+/// 物理位置 p が前置シフトキー位置か。
+#[inline]
+fn is_shift_physical(kp: KeyboardParams, p: usize) -> bool {
+    p == kp.shift_left as usize || p == kp.shift_right as usize
+}
+
+/// 拗音方式の「同一物理キー排他」制約（ExclusivePair の層違い版）。
+///
+/// 拗音面 physical p に子音を置けるのは、L1 physical p が
+/// 「前置シフトキー」でも「ゃゅょ」でもない場合に限る（自己参照 [TT] や
+/// シフト衝突を回避）。スワップ (c1↔c2) 後にこの不変条件が破れるか判定する。
+///
+/// L1内スワップ（ゃゅょ移動）と拗音面内スワップ（子音移動）は層をまたがないため、
+/// 反対側の層は不変。よって現在の slot_to_char をそのまま参照できる。
+fn yoon_swap_violates(layout: &Layout, c1: CharId, c2: CharId) -> bool {
+    if !layout.kp.yoon {
+        return false;
+    }
+    let npl = layout.kp.num_slots_per_layer as usize;
+    for &c in &[c1, c2] {
+        let new_slot = slot_after_swap(layout, c1, c2, c) as usize;
+        if is_yoon_shift_id(c) {
+            // ゃゅょ が L1 physical p へ → 拗音面 p が子音なら違反
+            if new_slot < npl {
+                let yoon_c = layout.slot_to_char[2 * npl + new_slot];
+                if layout.kp.is_consonant(yoon_c) {
+                    return true;
+                }
+            }
+        } else if layout.kp.is_consonant(c) {
+            // 子音が拗音面 physical p へ → L1 p が shift/ゃゅょ なら違反
+            if new_slot >= 2 * npl {
+                let p = new_slot - 2 * npl;
+                if is_shift_physical(layout.kp, p) || is_yoon_shift_id(layout.slot_to_char[p]) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// スワップ (c1↔c2) が制約（排他ペア + 拗音同一物理キー排他）に違反するか
 pub fn swap_would_violate(
     layout: &Layout,
     c1: CharId,
     c2: CharId,
     pairs: &[ExclusivePair],
 ) -> bool {
+    if yoon_swap_violates(layout, c1, c2) {
+        return true;
+    }
     if pairs.is_empty() {
         return false;
     }
@@ -648,20 +700,23 @@ mod tests {
 
     #[test]
     fn test_with_yoon_params() {
-        // 3x10: 禁止 = 3(ゃゅょ)+2(D/K) = 5, 使用可能 = 25
+        // 拗音面は全スロットが文字。void 数 = npl − 子音数。
+        // 3x10: 上限 = 30 − 2(D/K) − 3(ゃゅょ) = 25
         let kp = KeyboardParams::k3x10().with_yoon(11).unwrap();
         assert!(kp.yoon);
         assert_eq!(kp.num_consonants, 11);
-        assert_eq!(kp.num_yoon_void, 14); // 25 - 11
+        assert_eq!(kp.num_yoon_void, 19); // 30 - 11
+        assert_eq!(kp.yoon_char_count(), 30); // 全スロットが文字
         assert_eq!(kp.num_slots, 90); // 3 * 30
-                                       // 単一シフト: 禁止 = 3+1 = 4, 使用可能 = 26
+                                      // 単一シフト: 上限 = 30 − 1 − 3 = 26
         let ss = KeyboardParams::k3x10_single_shift().with_yoon(11).unwrap();
-        assert_eq!(ss.num_yoon_void, 15);
-        // 3x11: 禁止 = 3+2 = 5, 使用可能 = 28
+        assert_eq!(ss.num_yoon_void, 19);
+        // 3x11: 上限 = 33 − 2 − 3 = 28
         let k11 = KeyboardParams::k3x11().with_yoon(11).unwrap();
-        assert_eq!(k11.num_yoon_void, 17);
+        assert_eq!(k11.num_yoon_void, 22);
         assert_eq!(k11.num_slots, 99);
-        // 子音過多はエラー
+        // 子音上限
+        assert!(KeyboardParams::k3x10().with_yoon(25).is_ok());
         assert!(KeyboardParams::k3x10().with_yoon(26).is_err());
     }
 

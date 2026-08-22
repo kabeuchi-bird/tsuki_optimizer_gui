@@ -140,6 +140,35 @@ fn main() {
         None => toml_config.build_yoon_mode(),
     };
 
+    // ── 拗音テーブル構築 + キーボードパラメータ拡張 ──
+    use tsuki_optimize::yoon::{YoonTable, DEFAULT_CONSONANTS};
+    let yoon_table = if yoon_mode.is_hybrid() {
+        let spec = toml_config
+            .yoon
+            .consonants
+            .as_deref()
+            .unwrap_or(DEFAULT_CONSONANTS);
+        match YoonTable::from_spec(spec) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("エラー: 子音セットが不正です: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let kp = match &yoon_table {
+        Some(t) => match kp.with_yoon(t.num_consonants()) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("エラー: 拗音面を構成できません: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => kp,
+    };
+
     // ── 排他配置ペア制約 ──────────────────────────
     let exclusive_pairs = toml_config.build_exclusive_pairs();
 
@@ -184,7 +213,7 @@ fn main() {
         );
         std::process::exit(1);
     }
-    let corpus = match Corpus::from_file(corpus_file) {
+    let corpus = match Corpus::from_file_with_yoon(corpus_file, yoon_table.as_ref()) {
         Ok(c) => {
             eprintln!("コーパス: {}", corpus_file.display());
             c
@@ -257,7 +286,14 @@ fn main() {
 
     // ── 初期解生成 ───────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
-    let l1_only = toml_config.build_l1_only_set();
+    let mut l1_only = toml_config.build_l1_only_set();
+    if yoon_mode.is_hybrid() {
+        // 拗音シフト ゃゅょ は L1固定（1打でなければ方式が成立しない）
+        use tsuki_optimize::chars::{YA_ID, YO_ID, YU_ID};
+        l1_only.insert(YA_ID);
+        l1_only.insert(YU_ID);
+        l1_only.insert(YO_ID);
+    }
     let ctx = search::SearchContext {
         corpus: &corpus,
         weights: &weights,

@@ -6,12 +6,12 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::chars::{CharId, MAX_CHARS, VOID_CHAR_FIRST};
+use crate::chars::{CharId, CONSONANT_FIRST, MAX_CHARS, VOID_CHAR_FIRST};
 use crate::corpus::Corpus;
 use crate::cost::{delta_score, score, DeltaScoreBuffer, Weights};
 use crate::layout::{
-    is_fixed, is_inter_layer_movable, swap_would_violate, ExclusivePair, KeyboardParams, Layout,
-    SHIFT_SLOT_SENTINEL,
+    is_fixed, is_inter_layer_movable, is_yoon_shift_id, slot_col, slot_row, swap_would_violate,
+    ExclusivePair, KeyboardParams, Layout, SlotId, SHIFT_SLOT_SENTINEL,
 };
 
 /// ——————————————————————————————
@@ -231,6 +231,8 @@ pub enum OpKind {
     SwapL1,
     SwapL2,
     InterLayer,
+    /// 拗音面内スワップ（子音↔子音、子音↔void）。hybrid のみ。
+    SwapYoon,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +295,8 @@ pub struct SearchConfig {
     pub tabu_l1: usize,
     pub tabu_l2: usize,
     pub tabu_inter: usize,
+    /// 拗音面内スワップのタブーテニュア（hybrid のみ使用）
+    pub tabu_yoon: usize,
     pub inter_sample: usize,
     pub ab_sample_limit: usize,
     pub log_interval: usize,
@@ -312,6 +316,7 @@ impl Default for SearchConfig {
             tabu_l1: 15,
             tabu_l2: 15,
             tabu_inter: 25,
+            tabu_yoon: 15,
             inter_sample: 80,
             ab_sample_limit: 200,
             log_interval: 1_000,
@@ -369,6 +374,7 @@ pub fn run(
     let mut cur_tabu_l1 = config.tabu_l1;
     let mut cur_tabu_l2 = config.tabu_l2;
     let mut cur_tabu_inter = config.tabu_inter;
+    let mut cur_tabu_yoon = config.tabu_yoon;
     let tenure_grow_start = (config.restart_after as f64 * config.tenure_grow_threshold) as usize;
     let grow_period = config
         .restart_after
@@ -392,16 +398,24 @@ pub fn run(
         / grow_period as f64)
         .ceil()
         .max(1.0) as usize;
+    let tenure_step_yoon = (config.tabu_yoon as f64
+        * (config.tenure_max_scale - 1.0)
+        * config.tenure_grow_interval as f64
+        / grow_period as f64)
+        .ceil()
+        .max(1.0) as usize;
 
     let mut tabu_l1 = TabuList::new(cur_tabu_l1);
     let mut tabu_l2 = TabuList::new(cur_tabu_l2);
     let mut tabu_inter = TabuList::new(cur_tabu_inter);
+    let mut tabu_yoon = TabuList::new(cur_tabu_yoon);
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
     let mut candidates: Vec<Candidate> =
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    let mut yoon_free: Vec<CharId> = Vec::with_capacity(current.kp.yoon_char_count());
     let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
@@ -448,6 +462,22 @@ pub fn run(
             &mut pair_cache,
         );
 
+        // 拗音面内スワップ（hybrid のみ）
+        if current.kp.yoon {
+            collect_yoon_chars_into(&current, &mut yoon_free);
+            generate_swap_candidates(
+                &current,
+                ctx,
+                &yoon_free,
+                OpKind::SwapYoon,
+                config.ab_sample_limit,
+                rng,
+                &mut candidates,
+                &mut delta_buf,
+                &mut pair_cache,
+            );
+        }
+
         if candidates.is_empty() {
             break;
         }
@@ -464,6 +494,7 @@ pub fn run(
                 OpKind::SwapL1 => tabu_l1.contains(cand.c1, cand.c2),
                 OpKind::SwapL2 => tabu_l2.contains(cand.c1, cand.c2),
                 OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
+                OpKind::SwapYoon => tabu_yoon.contains(cand.c1, cand.c2),
             };
             if !is_tabu {
                 if best_free.is_none_or(|f| cand.delta < f.delta) {
@@ -495,6 +526,7 @@ pub fn run(
             OpKind::SwapL1 => tabu_l1.add(chosen.c1, chosen.c2),
             OpKind::SwapL2 => tabu_l2.add(chosen.c1, chosen.c2),
             OpKind::InterLayer => tabu_inter.add(chosen.c1, chosen.c2),
+            OpKind::SwapYoon => tabu_yoon.add(chosen.c1, chosen.c2),
         }
 
         if current_score < best_score {
@@ -513,13 +545,16 @@ pub fn run(
             if cur_tabu_l1 != config.tabu_l1
                 || cur_tabu_l2 != config.tabu_l2
                 || cur_tabu_inter != config.tabu_inter
+                || cur_tabu_yoon != config.tabu_yoon
             {
                 cur_tabu_l1 = config.tabu_l1;
                 cur_tabu_l2 = config.tabu_l2;
                 cur_tabu_inter = config.tabu_inter;
+                cur_tabu_yoon = config.tabu_yoon;
                 tabu_l1 = TabuList::new(cur_tabu_l1);
                 tabu_l2 = TabuList::new(cur_tabu_l2);
                 tabu_inter = TabuList::new(cur_tabu_inter);
+                tabu_yoon = TabuList::new(cur_tabu_yoon);
             }
         } else {
             no_improve += 1;
@@ -530,15 +565,20 @@ pub fn run(
                 let max_l1 = (config.tabu_l1 as f64 * config.tenure_max_scale) as usize;
                 let max_l2 = (config.tabu_l2 as f64 * config.tenure_max_scale) as usize;
                 let max_inter = (config.tabu_inter as f64 * config.tenure_max_scale) as usize;
-                let grew =
-                    cur_tabu_l1 < max_l1 || cur_tabu_l2 < max_l2 || cur_tabu_inter < max_inter;
+                let max_yoon = (config.tabu_yoon as f64 * config.tenure_max_scale) as usize;
+                let grew = cur_tabu_l1 < max_l1
+                    || cur_tabu_l2 < max_l2
+                    || cur_tabu_inter < max_inter
+                    || cur_tabu_yoon < max_yoon;
                 cur_tabu_l1 = (cur_tabu_l1 + tenure_step_l1).min(max_l1);
                 cur_tabu_l2 = (cur_tabu_l2 + tenure_step_l2).min(max_l2);
                 cur_tabu_inter = (cur_tabu_inter + tenure_step_inter).min(max_inter);
+                cur_tabu_yoon = (cur_tabu_yoon + tenure_step_yoon).min(max_yoon);
                 if grew {
                     tabu_l1 = TabuList::new(cur_tabu_l1);
                     tabu_l2 = TabuList::new(cur_tabu_l2);
                     tabu_inter = TabuList::new(cur_tabu_inter);
+                    tabu_yoon = TabuList::new(cur_tabu_yoon);
                 }
             }
         }
@@ -583,9 +623,11 @@ pub fn run(
             cur_tabu_l1 = config.tabu_l1;
             cur_tabu_l2 = config.tabu_l2;
             cur_tabu_inter = config.tabu_inter;
+            cur_tabu_yoon = config.tabu_yoon;
             tabu_l1 = TabuList::new(cur_tabu_l1);
             tabu_l2 = TabuList::new(cur_tabu_l2);
             tabu_inter = TabuList::new(cur_tabu_inter);
+            tabu_yoon = TabuList::new(cur_tabu_yoon);
 
             let _ = writeln!(
                 out,
@@ -658,6 +700,14 @@ fn collect_l2_chars_into(layout: &Layout, out: &mut Vec<CharId>) {
         if !layout.is_l1(c) && !is_void(c) {
             out.push(c);
         }
+    }
+}
+
+/// 拗音面の文字（子音 + void）を既存 Vec に収集（再利用版、hybrid のみ）
+fn collect_yoon_chars_into(layout: &Layout, out: &mut Vec<CharId>) {
+    out.clear();
+    for c in layout.kp.yoon_char_range() {
+        out.push(c as CharId);
     }
 }
 
@@ -852,6 +902,21 @@ fn random_perturbation(
         }
         layout.swap_chars(c1, c2);
     }
+
+    // hybrid: 拗音面も撹乱する
+    if kp.yoon {
+        let yoon_chars: Vec<CharId> = kp.yoon_char_range().map(|c| c as CharId).collect();
+        if yoon_chars.len() >= 2 {
+            for _ in 0..n_swaps {
+                let c1 = *yoon_chars.choose(rng).unwrap();
+                let c2 = *yoon_chars.choose(rng).unwrap();
+                if c1 == c2 || swap_would_violate(layout, c1, c2, pairs) {
+                    continue;
+                }
+                layout.swap_chars(c1, c2);
+            }
+        }
+    }
 }
 
 /// ——————————————————————————————
@@ -884,6 +949,75 @@ pub fn build_initial_layout(
     layout
 }
 
+/// hybrid: 拗音面（第3層）を構築する。
+///
+/// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
+/// 2. 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
+///    以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
+///
+/// mode=none では呼ばれない（呼び出し側で kp.yoon を確認する）。
+fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams) {
+    let npl = kp.num_slots_per_layer as usize;
+    let nc = kp.num_cols;
+    let unigrams = &ctx.corpus.unigrams;
+
+    // 1. ゃゅょ を L1 へ移動
+    for &yc in &[crate::chars::YO_ID, crate::chars::YU_ID, crate::chars::YA_ID] {
+        if layout.is_l1(yc) {
+            continue;
+        }
+        // 最低頻度の可動 L1 基底文字を L2 へ退避
+        let target = (0..kp.num_chars as CharId)
+            .filter(|&c| {
+                layout.is_l1(c)
+                    && !is_fixed(c, kp)
+                    && !ctx.l1_only.contains(&c)
+                    && !is_void(c)
+            })
+            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
+        if let Some(t) = target {
+            layout.swap_chars(yc, t);
+        }
+    }
+
+    // 2. 子音を配置できる拗音面 physical（シフト位置・ゃゅょ位置を除く）を難易度昇順で
+    let difficulty = |p: usize| -> f64 {
+        let row = slot_row(p as u8, nc) as usize;
+        let col = slot_col(p as u8, nc) as usize;
+        ctx.weights.slot_difficulty[row][col]
+    };
+    let is_forbidden = |layout: &Layout, p: usize| -> bool {
+        p == kp.shift_left as usize
+            || p == kp.shift_right as usize
+            || is_yoon_shift_id(layout.slot_to_char[p])
+    };
+    let mut avail: Vec<usize> = (0..npl).filter(|&p| !is_forbidden(layout, p)).collect();
+    avail.sort_by(|&a, &b| difficulty(a).total_cmp(&difficulty(b)));
+
+    // 子音を頻度降順に
+    let k = kp.num_consonants as usize;
+    let mut cons: Vec<CharId> = (0..k as CharId).map(|i| CONSONANT_FIRST + i).collect();
+    cons.sort_by(|&a, &b| unigrams[b as usize].total_cmp(&unigrams[a as usize]));
+
+    // 子音を最良スロットへ
+    for (i, &c) in cons.iter().enumerate() {
+        let slot = (2 * npl + avail[i]) as SlotId;
+        layout.char_to_slot[c as usize] = slot;
+        layout.slot_to_char[slot as usize] = c;
+    }
+
+    // 残りの拗音面スロットに void を割り当てる
+    let mut void_id = CONSONANT_FIRST + kp.num_consonants;
+    for p in 0..npl {
+        let slot = 2 * npl + p;
+        if !kp.is_consonant(layout.slot_to_char[slot]) {
+            layout.char_to_slot[void_id as usize] = slot as SlotId;
+            layout.slot_to_char[slot] = void_id;
+            void_id += 1;
+        }
+    }
+}
+
 /// 頻度上位の文字をLayer 1へ配置（従来方式）
 fn build_initial_2_263(
     ctx: &SearchContext,
@@ -891,6 +1025,9 @@ fn build_initial_2_263(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    if kp.yoon {
+        setup_yoon_face(&mut layout, ctx, kp);
+    }
 
     let l1_char_slots = kp.num_slots_per_layer as usize
         - if kp.size == crate::layout::KeyboardSize::K3x11 {
@@ -1021,6 +1158,9 @@ fn build_initial_random(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    if kp.yoon {
+        setup_yoon_face(&mut layout, ctx, kp);
+    }
 
     let movable: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
@@ -1104,5 +1244,160 @@ fn fix_exclusive_pair_violations(
         if !any_violation {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chars::{YA_ID, YO_ID, YU_ID};
+    use crate::yoon::{YoonTable, DEFAULT_CONSONANTS};
+
+    const YOON_CORPUS: &str = "\
+        きゃきゅきょしゃしゅしょちゃちゅちょにゃにゅにょひゃひゅひょ\
+        みゃみゅみょりゃりゅりょぎゃぎゅぎょじゃじゅじょびゃびゅびょ\
+        ぴゃぴゅぴょきょうしょうじょうりょうびょうぎょうにゅうす\
+        しているのはたかいてにをとなっくれるさきこそうんおもちよけ";
+
+    fn hybrid_ctx_fixtures(
+        kp: KeyboardParams,
+    ) -> (Corpus, Weights, HashSet<CharId>, Vec<ExclusivePair>) {
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let corpus = Corpus::from_str_with_yoon(YOON_CORPUS, Some(&table));
+        let weights = Weights {
+            kp,
+            ..Default::default()
+        };
+        let mut l1_only: HashSet<CharId> = HashSet::new();
+        for c in [
+            crate::chars::DAKUTEN_ID,
+            crate::chars::HANDAKUTEN_ID,
+            YA_ID,
+            YU_ID,
+            YO_ID,
+        ] {
+            l1_only.insert(c);
+        }
+        (corpus, weights, l1_only, Vec::new())
+    }
+
+    /// レイアウトが有効か（全単射 + 拗音制約）を検証する
+    fn assert_valid_hybrid(layout: &Layout) {
+        let kp = layout.kp;
+        let npl = kp.num_slots_per_layer as usize;
+
+        // 全文字（基底非void + 拗音面）が全単射
+        let charset: Vec<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| c < VOID_CHAR_FIRST)
+            .chain(kp.yoon_char_range().map(|c| c as CharId))
+            .collect();
+        for &c in &charset {
+            let s = layout.char_to_slot[c as usize];
+            assert_eq!(
+                layout.slot_to_char[s as usize], c,
+                "char {c} at slot {s} not bijective"
+            );
+        }
+
+        // ゃゅょ は L1
+        for yc in [YA_ID, YU_ID, YO_ID] {
+            assert!(layout.is_l1(yc), "ゃゅょ ({yc}) must be in L1");
+        }
+
+        // 子音は禁止物理位置（シフト/ゃゅょ）に置かれない
+        for c in 0..kp.num_consonants as CharId {
+            let cons = CONSONANT_FIRST + c;
+            let slot = layout.char_to_slot[cons as usize] as usize;
+            assert!(slot >= 2 * npl, "consonant {cons} must be in yoon layer");
+            let p = slot - 2 * npl;
+            assert!(
+                p != kp.shift_left as usize && p != kp.shift_right as usize,
+                "consonant {cons} on shift physical {p}"
+            );
+            assert!(
+                !is_yoon_shift_id(layout.slot_to_char[p]),
+                "consonant {cons} shares physical {p} with ゃゅょ"
+            );
+        }
+    }
+
+    fn verify_hybrid_deltas(layout: &Layout, corpus: &Corpus, weights: &Weights) {
+        let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
+        let score_before = score(layout, corpus, weights);
+        let kp = layout.kp;
+        let charset: Vec<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| c < VOID_CHAR_FIRST)
+            .chain(kp.yoon_char_range().map(|c| c as CharId))
+            .collect();
+
+        for i in 0..charset.len() {
+            for j in (i + 1)..charset.len() {
+                let (c1, c2) = (charset[i], charset[j]);
+                let d = delta_score(layout, corpus, weights, c1, c2, &mut buf);
+                let mut l2 = layout.clone();
+                l2.swap_chars(c1, c2);
+                let expected = score(&l2, corpus, weights) - score_before;
+                assert!(
+                    (d - expected).abs() < 1e-6,
+                    "hybrid delta mismatch ({c1},{c2}): got {d}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    fn run_hybrid_checks(base: KeyboardParams) {
+        let kp = base.with_yoon(11).unwrap();
+        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(kp);
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let mut sink = Vec::new();
+        let layout = build_initial_2_263(&ctx, kp, &mut sink);
+        assert_valid_hybrid(&layout);
+        verify_hybrid_deltas(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_3x10() {
+        run_hybrid_checks(KeyboardParams::k3x10());
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_single_shift() {
+        run_hybrid_checks(KeyboardParams::k3x10_single_shift());
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_3x11() {
+        run_hybrid_checks(KeyboardParams::k3x11());
+    }
+
+    #[test]
+    fn test_hybrid_swap_constraint() {
+        // 子音がある拗音物理位置へ ゃ を L1 スワップできない
+        let kp = KeyboardParams::k3x10().with_yoon(11).unwrap();
+        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(kp);
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let mut sink = Vec::new();
+        let layout = build_initial_2_263(&ctx, kp, &mut sink);
+        let npl = kp.num_slots_per_layer as usize;
+
+        // 子音が乗っている物理位置を探し、その物理位置の L1 文字と ゃ の交換が違反すること
+        let cons0 = CONSONANT_FIRST;
+        let p = layout.char_to_slot[cons0 as usize] as usize - 2 * npl;
+        let l1_char_at_p = layout.slot_to_char[p];
+        // ゃ をその L1 位置へ動かす swap は違反する（子音がいるため）
+        assert!(
+            swap_would_violate(&layout, YA_ID, l1_char_at_p, &pairs),
+            "ゃ moving onto a consonant's physical key must violate"
+        );
     }
 }
