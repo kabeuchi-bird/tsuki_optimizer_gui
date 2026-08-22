@@ -470,6 +470,17 @@ pub struct ScoreBreakdown {
     pub l1_coverage: f64,
     /// 指別負荷 [0..8]: 左小指, 左薬指, 左中指, 左人差し指, 右人差し指, 右中指, 右薬指, 右小指
     pub finger_load: [f64; 8],
+
+    // ── hybrid 拗音方式の内訳（mode=none では全て 0）──
+    // いずれも上の合計値の内数（別枠の加算ではない）。
+    /// 拗音ユニットの出現頻度合計（＝子音の出現頻度合計）
+    pub yoon_freq: f64,
+    /// 子音の打鍵数コスト
+    pub yoon_stroke_cost: f64,
+    /// 子音のスロット難易度コスト
+    pub yoon_uni_cost: f64,
+    /// 子音が絡むバイグラムコスト（子音→シフト、シフト→次文字を含む）
+    pub yoon_bi_cost: f64,
 }
 
 /// スコア内訳を構造体として返す
@@ -481,6 +492,10 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
     let mut total_strokes = 0.0;
     let mut l1_coverage = 0.0;
     let mut finger_load = [0.0f64; 8];
+    let mut yoon_freq = 0.0;
+    let mut yoon_stroke_cost = 0.0;
+    let mut yoon_uni_cost = 0.0;
+    let mut yoon_bi_cost = 0.0;
 
     for c in w.kp.scored_chars() {
         let freq = corpus.unigrams[c as usize];
@@ -491,7 +506,13 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         stroke_cost += freq * strokes as f64 * w.stroke_scale;
         total_strokes += freq * strokes as f64;
         let slot = layout.char_to_slot[c as usize];
-        uni_cost += freq * unigram_cost_for_slot(slot, w);
+        let this_uni = freq * unigram_cost_for_slot(slot, w);
+        uni_cost += this_uni;
+        if w.kp.is_consonant(c) {
+            yoon_freq += freq;
+            yoon_stroke_cost += freq * strokes as f64 * w.stroke_scale;
+            yoon_uni_cost += this_uni;
+        }
         if strokes == 1 {
             l1_coverage += freq;
         }
@@ -514,7 +535,11 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         }
         let s1 = layout.char_to_slot[bg.c1 as usize];
         let s2 = layout.char_to_slot[bg.c2 as usize];
-        bi_cost += bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
+        let this_bi = bg.freq * bigram_inter_cost(bg.c1, bg.c2, s1, s2, w);
+        bi_cost += this_bi;
+        if w.kp.is_consonant(bg.c1) || w.kp.is_consonant(bg.c2) {
+            yoon_bi_cost += this_bi;
+        }
     }
     for tg in &corpus.trigrams {
         if tg.freq == 0.0 {
@@ -543,6 +568,10 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         total_strokes,
         l1_coverage,
         finger_load,
+        yoon_freq,
+        yoon_stroke_cost,
+        yoon_uni_cost,
+        yoon_bi_cost,
     }
 }
 
@@ -559,6 +588,16 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     let _ = writeln!(out, "  難易度コスト  : {:.4}", bd.uni_cost);
     let _ = writeln!(out, "  バイグラムコスト: {:.4}", bd.bi_cost);
     let _ = writeln!(out, "  トライグラムコスト: {:.4}", bd.tri_cost);
+    if w.kp.yoon {
+        let _ = writeln!(
+            out,
+            "  └ 拗音（内数）: 出現 {:.2}%  打鍵 {:.4}  難易度 {:.4}  バイグラム {:.4}",
+            bd.yoon_freq * 100.0,
+            bd.yoon_stroke_cost,
+            bd.yoon_uni_cost,
+            bd.yoon_bi_cost
+        );
+    }
     let _ = writeln!(out, "  合計スコア    : {:.4}", bd.total);
 }
 

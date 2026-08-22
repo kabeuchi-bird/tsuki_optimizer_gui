@@ -9,6 +9,7 @@ use tsuki_optimize::config::{keyboard_params_from_str, Config};
 use tsuki_optimize::corpus::Corpus;
 use tsuki_optimize::cost::{score, Weights};
 use tsuki_optimize::search::{self, SearchContext, SearchPhase, SearchUpdate};
+use tsuki_optimize::yoon::{YoonMode, YoonSetup};
 
 use super::log_writer::{ColorData, ColorMode, GuiLogWriter};
 
@@ -23,6 +24,10 @@ pub struct App {
     pub corpus_path_str: String,
     pub keyboard_size_str_input: String,
     pub initial_layout_str_input: String,
+    /// 拗音方式: "none" / "hybrid"
+    pub yoon_mode_str_input: String,
+    /// 子音セット（空欄でデフォルト11種）
+    pub consonants_str_input: String,
 
     // 探索スレッド制御
     pub stop_flag: Arc<AtomicBool>,
@@ -49,6 +54,8 @@ pub struct App {
     // 表示設定
     pub color_mode: ColorMode,
     pub show_layer2: bool,
+    /// 拗音面（第3層）を表示するか。hybrid で探索したときのみ意味を持つ。
+    pub show_yoon: bool,
 
     // 色分けキャッシュ（latest_update 更新時にリセット）
     pub cached_color_data: Option<ColorData>,
@@ -89,6 +96,18 @@ impl App {
             .as_deref()
             .unwrap_or("2-263")
             .to_string();
+        let yoon_mode = toml_config
+            .yoon
+            .mode
+            .as_deref()
+            .unwrap_or("none")
+            .to_string();
+        let consonants = toml_config
+            .yoon
+            .consonants
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
 
         App {
             seed_str: String::new(),
@@ -97,6 +116,8 @@ impl App {
             corpus_path_str: corpus_path,
             keyboard_size_str_input: keyboard_size,
             initial_layout_str_input: initial_layout,
+            yoon_mode_str_input: yoon_mode,
+            consonants_str_input: consonants,
             stop_flag: Arc::new(AtomicBool::new(false)),
             rx: None,
             running: false,
@@ -111,6 +132,7 @@ impl App {
             restart_iters: Vec::new(),
             color_mode: ColorMode::Fitness,
             show_layer2: false,
+            show_yoon: true,
             cached_color_data: None,
             config_error,
             graph_follow: true,
@@ -135,6 +157,23 @@ impl App {
         };
 
         let kp = keyboard_params_from_str(&self.keyboard_size_str_input);
+
+        // 拗音方式の解決（kp の拡張・コーパス分解テーブル・l1_only 追加を一括で得る）。
+        // build_weights より前に kp を確定させる必要がある。
+        let yoon_mode = YoonMode::from_config_str(&self.yoon_mode_str_input);
+        let consonants = if self.consonants_str_input.trim().is_empty() {
+            None
+        } else {
+            Some(self.consonants_str_input.trim())
+        };
+        let yoon = match YoonSetup::resolve(kp, yoon_mode, consonants) {
+            Ok(y) => y,
+            Err(e) => {
+                self.config_error = Some(e);
+                return;
+            }
+        };
+        let kp = yoon.kp;
 
         let exclusive_pairs = toml_config.build_exclusive_pairs();
         let mut search_config = toml_config.build_search_config();
@@ -187,7 +226,8 @@ impl App {
             ));
             return;
         }
-        let corpus = match Corpus::from_file(Path::new(&corpus_path)) {
+        let corpus = match Corpus::from_file_with_yoon(Path::new(&corpus_path), yoon.table.as_ref())
+        {
             Ok(c) => c,
             Err(e) => {
                 self.config_error = Some(format!(
@@ -264,7 +304,9 @@ impl App {
             };
 
             let mut rng = SmallRng::seed_from_u64(seed);
-            let l1_only = toml_config.build_l1_only_set();
+            let mut l1_only = toml_config.build_l1_only_set();
+            // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）
+            yoon.extend_l1_only(&mut l1_only);
             let ctx = SearchContext {
                 corpus: &corpus,
                 weights: &weights,

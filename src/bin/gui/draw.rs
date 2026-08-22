@@ -2,13 +2,14 @@ use eframe::egui;
 use egui::epaint::StrokeKind;
 use egui_plot::{Line, PlotPoints, VLine};
 
-use tsuki_optimize::chars::{CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
+use tsuki_optimize::chars::{is_base_kana, CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::corpus::Corpus;
 use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
-    col_to_finger, keystrokes_for_slot, slot_col, slot_hand, Hand, KeyboardSize,
-    SHIFT_SLOT_SENTINEL,
+    col_to_finger, keystrokes_for_slot, layer_of, physical_of, slot_col, slot_hand, slot_row,
+    yoon_physical_forbidden, Hand, KeyboardSize, Layer, MAX_SLOTS, SHIFT_SLOT_SENTINEL,
 };
+use tsuki_optimize::yoon::consonant_label;
 use tsuki_optimize::search::SearchUpdate;
 
 use super::app::App;
@@ -39,13 +40,15 @@ impl App {
         }
         let color_data = self.cached_color_data.as_ref().unwrap();
 
-        let layers: &[(&str, usize)] = if self.show_layer2 {
-            &[("Layer 1", 0), ("Layer 2", npl)]
-        } else {
-            &[("Layer 1", 0)]
-        };
+        let mut layers: Vec<(&str, usize)> = vec![("Layer 1", 0)];
+        if self.show_layer2 {
+            layers.push(("Layer 2", npl));
+        }
+        if kp.yoon && self.show_yoon {
+            layers.push(("拗音面（子音 + ゃゅょ）", 2 * npl));
+        }
 
-        for &(label, slot_offset) in layers {
+        for &(label, slot_offset) in &layers {
             ui.label(egui::RichText::new(label).strong().size(14.0));
 
             let cell_size = egui::vec2(36.0, 36.0);
@@ -61,6 +64,11 @@ impl App {
                             && slot_offset == 0
                             && (slot == kp.shift_left as usize || slot == kp.shift_right as usize);
 
+                        let is_yoon_layer = slot_offset >= 2 * npl;
+                        // 拗音面で子音を置けない物理位置（シフトキー / ゃゅょ の位置）
+                        let yoon_blocked = is_yoon_layer
+                            && yoon_physical_forbidden(layout, (slot - 2 * npl) as u8);
+
                         let char_id = layout.slot_to_char[slot];
                         let ch = if is_shift {
                             if slot == kp.shift_left as usize {
@@ -68,13 +76,32 @@ impl App {
                             } else {
                                 '★'
                             }
+                        } else if is_yoon_layer {
+                            // 子音はトークン表示（"Ky" 等）なので後段で別途描画する
+                            ' '
                         } else if char_id == SHIFT_SLOT_SENTINEL || char_id >= VOID_CHAR_FIRST {
                             '□'
                         } else {
                             CHAR_LIST[char_id as usize]
                         };
 
-                        let bg_color = if is_shift {
+                        // 拗音面のラベル: 子音トークン / 使用不可 '×' / 空き '・'
+                        let yoon_label: String = if !is_yoon_layer {
+                            String::new()
+                        } else if yoon_blocked {
+                            "×".to_string()
+                        } else {
+                            consonant_label(kp.consonant_mask, char_id)
+                                .unwrap_or("・")
+                                .to_string()
+                        };
+
+                        let bg_color = if yoon_blocked {
+                            // 使用不可スロットはグレーアウト
+                            egui::Color32::from_rgb(120, 120, 120)
+                        } else if is_yoon_layer && !kp.is_consonant(char_id) {
+                            egui::Color32::from_rgb(210, 210, 210)
+                        } else if is_shift {
                             // 3x11 の専用シフトキー: ヒートマップ時はシフト打鍵頻度で着色
                             if let ColorData::Frequency {
                                 max_freq,
@@ -90,7 +117,8 @@ impl App {
                             } else {
                                 egui::Color32::from_rgb(160, 160, 160)
                             }
-                        } else if char_id == SHIFT_SLOT_SENTINEL || char_id >= VOID_CHAR_FIRST {
+                        } else if !is_base_kana(char_id) && !kp.is_consonant(char_id) {
+                            // void / シフトキーセンチネル（子音は着色対象なので除外しない）
                             egui::Color32::from_rgb(200, 200, 200)
                         } else {
                             // シフトキー兼文字キー（3x10のD/K、単一シフトのE）はシフト打鍵分を加算。
@@ -118,13 +146,17 @@ impl App {
                             )
                         };
 
-                        let is_l2 = slot_offset > 0;
-                        let stroke_color = if is_l2 {
+                        let is_sub_layer = slot_offset > 0;
+                        let is_l2 = is_sub_layer && !is_yoon_layer;
+                        let stroke_color = if is_yoon_layer {
+                            // 拗音面は青系の枠で L2 と区別する
+                            egui::Color32::from_rgb(90, 120, 170)
+                        } else if is_l2 {
                             egui::Color32::from_rgb(150, 150, 150)
                         } else {
                             egui::Color32::from_rgb(60, 60, 60)
                         };
-                        let stroke_width = if is_l2 { 1.0 } else { 2.0 };
+                        let stroke_width = if is_sub_layer { 1.0 } else { 2.0 };
 
                         let (rect, _response) =
                             ui.allocate_exact_size(cell_size, egui::Sense::hover());
@@ -158,11 +190,17 @@ impl App {
                             egui::Color32::WHITE
                         };
 
+                        // 拗音面は2文字トークン（"Ky" 等）なので少し小さめに描画する
+                        let (text, font_size) = if is_yoon_layer {
+                            (yoon_label, 13.0)
+                        } else {
+                            (ch.to_string(), 16.0)
+                        };
                         ui.painter().text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
-                            ch.to_string(),
-                            egui::FontId::proportional(16.0),
+                            text,
+                            egui::FontId::proportional(font_size),
                             text_color,
                         );
                     }
@@ -196,8 +234,9 @@ impl App {
         let kp = layout.kp;
 
         let mut finger_load = [0.0f64; 8];
-        for c in 0..kp.num_chars as CharId {
-            if c >= VOID_CHAR_FIRST {
+        // 基底かな + 子音（拗音面の打鍵も該当指に加算する）
+        for c in kp.scored_chars() {
+            if !is_base_kana(c) && !kp.is_consonant(c) {
                 continue;
             }
             let freq = upd.unigrams[c as usize];
@@ -407,6 +446,18 @@ impl App {
 
                     ui.label("トライグラムコスト:");
                     ui.label(format!("{:.4}", bd.tri_cost));
+
+                    if upd.best_layout.kp.yoon {
+                        ui.end_row();
+                        ui.label("拗音（内数）:");
+                        ui.label(format!(
+                            "出現 {:.2}%  打鍵 {:.4}  難易度 {:.4}  バイグラム {:.4}",
+                            bd.yoon_freq * 100.0,
+                            bd.yoon_stroke_cost,
+                            bd.yoon_uni_cost,
+                            bd.yoon_bi_cost
+                        ));
+                    }
                     ui.end_row();
 
                     ui.label("合計スコア:");
@@ -435,12 +486,13 @@ fn precompute_color_data(
 ) -> ColorData {
     let layout = &upd.best_layout;
     let kp = layout.kp;
-    let nc = kp.num_chars;
 
     match color_mode {
         ColorMode::Fitness => {
-            let mut freq_sorted: Vec<(CharId, f64)> = (0..nc as CharId)
-                .filter(|&c| c < VOID_CHAR_FIRST)
+            // 基底かな + 子音を頻度ランクの対象にする（void は除外）
+            let mut freq_sorted: Vec<(CharId, f64)> = kp
+                .scored_chars()
+                .filter(|&c| is_base_kana(c) || kp.is_consonant(c))
                 .map(|c| (c, upd.unigrams[c as usize]))
                 .collect();
             freq_sorted.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
@@ -452,27 +504,22 @@ fn precompute_color_data(
             let mut slot_sorted: Vec<(u8, f64)> = (0..kp.num_slots as u8)
                 .filter(|&s| layout.slot_to_char[s as usize] != SHIFT_SLOT_SENTINEL)
                 .map(|s| {
-                    let physical = if (s as usize) < kp.num_slots_per_layer as usize {
-                        s
-                    } else {
-                        s - kp.num_slots_per_layer
-                    };
-                    let r =
-                        (physical as usize % (kp.num_cols as usize * 3)) / kp.num_cols as usize;
+                    let physical = physical_of(s, kp);
+                    let r = slot_row(physical, kp.num_cols) as usize;
                     let c = slot_col(physical, kp.num_cols) as usize;
-                    let l2_penalty = if (s as usize) >= kp.num_slots_per_layer as usize {
-                        3.0
-                    } else {
-                        0.0
+                    // L2 は前置シフトの分だけ不利。拗音面は1打なのでペナルティなし。
+                    let layer_penalty = match layer_of(s, kp) {
+                        Layer::L2 => 3.0,
+                        Layer::L1 | Layer::Yoon => 0.0,
                     };
                     let row_d = [1.3, 0.9, 1.5][r];
                     let center = (kp.num_cols as f64 - 1.0) / 2.0;
                     let col_d = ((c as f64 - center).abs() / center) * 0.8;
-                    (s, row_d + col_d + l2_penalty)
+                    (s, row_d + col_d + layer_penalty)
                 })
                 .collect();
             slot_sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-            let mut slot_rank = [0u8; 66]; // MAX_SLOTS
+            let mut slot_rank = [0u8; MAX_SLOTS];
             for (rank, &(s, _)) in slot_sorted.iter().enumerate() {
                 slot_rank[s as usize] = rank as u8;
             }
