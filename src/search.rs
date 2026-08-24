@@ -115,7 +115,10 @@ impl TabuSet {
         }
     }
 
-    /// テニュアを設定値へ戻す。変化があった場合のみ作り直す（内容は温存）。
+    /// テニュアを設定値へ戻す（改善時）。
+    ///
+    /// テニュアが拡大されていた場合のみ作り直す。`rebuild()` は内容を破棄するので、
+    /// 「拡大されていたら中身ごとリセット、拡大されていなければ何もしない」という挙動になる。
     fn reset(&mut self) {
         if self.cur != self.base {
             self.cur = self.base;
@@ -124,6 +127,8 @@ impl TabuSet {
     }
 
     /// テニュアを設定値へ戻し、タブー内容を必ず破棄する（再起動時）。
+    ///
+    /// `reset()` と違い、テニュアが設定値のままでも作り直す。
     fn reset_and_clear(&mut self) {
         self.cur = self.base;
         self.rebuild();
