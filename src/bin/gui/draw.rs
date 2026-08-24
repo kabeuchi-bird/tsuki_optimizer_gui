@@ -156,7 +156,7 @@ impl App {
                         } else {
                             egui::Color32::from_rgb(60, 60, 60)
                         };
-                        let stroke_width = if is_sub_layer { 1.0 } else { 2.0 };
+                        let stroke_width = if is_sub_layer { 1.0_f32 } else { 2.0_f32 };
 
                         let (rect, _response) =
                             ui.allocate_exact_size(cell_size, egui::Sense::hover());
@@ -175,7 +175,7 @@ impl App {
                             ui.painter().rect_stroke(
                                 inner,
                                 3.0,
-                                egui::Stroke::new(0.5, egui::Color32::from_rgb(120, 120, 120)),
+                                egui::Stroke::new(0.5_f32, egui::Color32::from_rgb(120, 120, 120)),
                                 StrokeKind::Middle,
                             );
                         }
@@ -318,11 +318,11 @@ impl App {
         let current_line = Line::new(current_points)
             .name("current")
             .color(egui::Color32::from_rgba_premultiplied(150, 150, 200, 120))
-            .width(1.0);
+            .width(1.0_f32);
         let best_line = Line::new(best_points)
             .name("best")
             .color(egui::Color32::from_rgb(50, 120, 220))
-            .width(2.5);
+            .width(2.5_f32);
 
         let window_width = 10_000.0;
         let max_iter = self.score_history.last().map(|&(x, _)| x).unwrap_or(0.0);
@@ -361,7 +361,7 @@ impl App {
                     plot_ui.vline(
                         VLine::new(restart_iter)
                             .color(egui::Color32::from_rgba_premultiplied(220, 80, 80, 100))
-                            .width(1.0),
+                            .width(1.0_f32),
                     );
                 }
                 // ウォームアップ中は毎フレーム範囲を再設定

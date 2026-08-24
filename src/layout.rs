@@ -726,16 +726,15 @@ fn yoon_swap_violates(layout: &Layout, c1: CharId, c2: CharId) -> bool {
         let physical = physical_of(new_slot, kp);
         match layer_of(new_slot, kp) {
             // ゃゅょ が L1 physical p へ → 拗音面 p が子音なら違反
-            Layer::L1 if crate::chars::is_yoon_shift_id(c) => {
-                if kp.is_consonant(layout.slot_to_char[(2 * npl + physical) as usize]) {
-                    return true;
-                }
+            Layer::L1
+                if crate::chars::is_yoon_shift_id(c)
+                    && kp.is_consonant(layout.slot_to_char[(2 * npl + physical) as usize]) =>
+            {
+                return true;
             }
             // 子音が拗音面 physical p へ → その物理位置が禁止なら違反
-            Layer::Yoon if kp.is_consonant(c) => {
-                if yoon_physical_forbidden(layout, physical) {
-                    return true;
-                }
+            Layer::Yoon if kp.is_consonant(c) && yoon_physical_forbidden(layout, physical) => {
+                return true;
             }
             _ => {}
         }
