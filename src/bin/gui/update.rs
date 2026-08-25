@@ -30,7 +30,10 @@ impl eframe::App for App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.corpus_path_str).desired_width(120.0),
                 );
-                ui.separator();
+            });
+
+            // 2段目: 配列に関する設定（1行に収めると拗音の欄が画面外に出るため分ける）
+            ui.horizontal(|ui| {
                 ui.label("keyboard:");
                 egui::ComboBox::from_id_salt("kb_size")
                     .selected_text(&self.keyboard_size_str_input)
@@ -72,11 +75,41 @@ impl eframe::App for App {
                             "ユーザー定義",
                         );
                     });
+                ui.separator();
+                ui.label("拗音:");
+                egui::ComboBox::from_id_salt("yoon_mode")
+                    .selected_text(&self.yoon_mode_str_input)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.yoon_mode_str_input,
+                            "none".to_string(),
+                            "none（従来）",
+                        );
+                        ui.selectable_value(
+                            &mut self.yoon_mode_str_input,
+                            "hybrid".to_string(),
+                            "hybrid（拗音面）",
+                        );
+                    });
+                // 子音セットは hybrid のときだけ意味を持つ
+                if self.yoon_mode_str_input == "hybrid" {
+                    ui.label("子音:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.consonants_str_input)
+                            .desired_width(180.0)
+                            .hint_text("空欄でデフォルト11種"),
+                    )
+                    .on_hover_text(
+                        "使用する子音トークンを連結して指定します。\n\
+                         有効: Ky Gy Sh J Ch Dy Ny Hy By Py My Ry\n\
+                         例: KyGyShJChNyHyByPyMyRy（デフォルト）",
+                    );
+                }
             });
 
             // 設定ファイルエラー表示
             if let Some(ref err) = self.config_error {
-                ui.colored_label(egui::Color32::RED, format!("⚠ config.toml エラー: {err}"));
+                ui.colored_label(egui::Color32::RED, format!("⚠ 設定エラー: {err}"));
             }
         });
 
@@ -118,6 +151,14 @@ impl eframe::App for App {
                 ui.radio_value(&mut self.color_mode, ColorMode::Log, "ログ");
                 ui.separator();
                 ui.checkbox(&mut self.show_layer2, "Layer 2 表示");
+                // 拗音面は hybrid で探索した結果があるときだけ切り替えられる
+                let has_yoon = self
+                    .latest_update
+                    .as_ref()
+                    .is_some_and(|u| u.best_layout.kp.yoon);
+                if has_yoon {
+                    ui.checkbox(&mut self.show_yoon, "拗音面 表示");
+                }
             });
             if self.color_mode != prev_mode {
                 self.invalidate_color_cache();

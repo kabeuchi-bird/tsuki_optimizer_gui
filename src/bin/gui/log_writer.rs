@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use tsuki_optimize::chars::MAX_CHARS;
+use tsuki_optimize::layout::MAX_SLOTS;
 
 // ──────────────────────────────────────────────────────────────
 // 色分けモード
@@ -21,7 +22,8 @@ pub enum ColorMode {
 pub enum ColorData {
     Fitness {
         freq_rank: [u8; MAX_CHARS],
-        slot_rank: [u8; 66],
+        /// スロット難易度ランク。拗音面を含む全スロット分を確保する。
+        slot_rank: [u8; MAX_SLOTS],
         num_valid: f32,
     },
     Frequency {

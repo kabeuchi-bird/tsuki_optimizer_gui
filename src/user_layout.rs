@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::chars::{build_char_to_id, CharId, MAX_CHARS, VOID_CHAR_FIRST};
+use crate::chars::{build_char_to_id, CharId, CONSONANT_FIRST, MAX_CHARS, VOID_CHAR_FIRST};
 use crate::layout::{KeyboardParams, KeyboardSize, Layout, SlotId, SHIFT_SLOT_SENTINEL, MAX_SLOTS};
 
 pub const USER_LAYOUT_PATH: &str = "initial_layout.toml";
@@ -174,11 +174,15 @@ fn assign_char(
     layer: &str,
 ) -> Result<(), String> {
     if c == '□' {
-        // void 文字: CharId を動的に割り当て
-        if *void_next as usize >= MAX_CHARS {
+        // void 文字: L1/L2 の void 区間 [VOID_CHAR_FIRST, CONSONANT_FIRST) から割り当てる。
+        // CONSONANT_FIRST 以降は拗音面の領域なので侵食してはならない。
+        if *void_next >= CONSONANT_FIRST {
             return Err(format!(
-                "void 文字（□）の数が上限を超えました（{} row{}, col{}）",
-                layer, row, col
+                "void 文字（□）の数が上限（{}個）を超えました（{} row{}, col{}）",
+                CONSONANT_FIRST - VOID_CHAR_FIRST,
+                layer,
+                row,
+                col
             ));
         }
         cts[*void_next as usize] = slot;

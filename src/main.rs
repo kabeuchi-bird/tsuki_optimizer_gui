@@ -20,6 +20,8 @@
 //   --log-interval  <n>     ログ間隔                 (toml: run.log_interval)
 //   --keyboard-size <s>     キーボードサイズ         (toml: run.keyboard_size)
 //                           "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
+//   --yoon          <s>     拗音方式                 (toml: yoon.mode)
+//                           "none"（デフォルト）/ "hybrid"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
 use rand::rngs::SmallRng;
@@ -131,6 +133,27 @@ fn main() {
         toml_config.build_keyboard_params()
     };
 
+    // ── 拗音方式決定（CLI > TOML > デフォルト）──
+    // CLIの --yoon が TOML の yoon.mode を上書きする
+    let yoon_mode = match cli.get("--yoon") {
+        Some(s) => tsuki_optimize::yoon::YoonMode::from_config_str(s),
+        None => toml_config.build_yoon_mode(),
+    };
+
+    // ── 拗音テーブル構築 + キーボードパラメータ拡張 ──
+    let yoon = match tsuki_optimize::yoon::YoonSetup::resolve(
+        kp,
+        yoon_mode,
+        toml_config.yoon.consonants.as_deref(),
+    ) {
+        Ok(y) => y,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let kp = yoon.kp;
+
     // ── 排他配置ペア制約 ──────────────────────────
     let exclusive_pairs = toml_config.build_exclusive_pairs();
 
@@ -175,7 +198,7 @@ fn main() {
         );
         std::process::exit(1);
     }
-    let corpus = match Corpus::from_file(corpus_file) {
+    let corpus = match Corpus::from_file_with_yoon(corpus_file, yoon.table.as_ref()) {
         Ok(c) => {
             eprintln!("コーパス: {}", corpus_file.display());
             c
@@ -247,7 +270,8 @@ fn main() {
 
     // ── 初期解生成 ───────────────────────────────
     let mut rng = SmallRng::seed_from_u64(seed);
-    let l1_only = toml_config.build_l1_only_set();
+    let mut l1_only = toml_config.build_l1_only_set();
+    yoon.extend_l1_only(&mut l1_only);
     let ctx = search::SearchContext {
         corpus: &corpus,
         weights: &weights,

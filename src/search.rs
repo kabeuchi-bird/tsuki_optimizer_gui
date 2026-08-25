@@ -6,12 +6,12 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::chars::{CharId, MAX_CHARS, VOID_CHAR_FIRST};
+use crate::chars::{is_base_kana, is_l1l2_void, CharId, CONSONANT_FIRST, MAX_CHARS};
 use crate::corpus::Corpus;
-use crate::cost::{delta_score, score, DeltaScoreBuffer, Weights};
+use crate::cost::{delta_score, score, unigram_cost_for_slot, DeltaScoreBuffer, Weights};
 use crate::layout::{
-    is_fixed, is_inter_layer_movable, swap_would_violate, ExclusivePair, KeyboardParams, Layout,
-    SHIFT_SLOT_SENTINEL,
+    is_fixed, is_inter_layer_movable, swap_would_violate, yoon_physical_forbidden, ExclusivePair,
+    KeyboardParams, Layout, SlotId, SHIFT_SLOT_SENTINEL,
 };
 
 /// ——————————————————————————————
@@ -61,6 +61,106 @@ impl TabuList {
     }
 }
 
+/// ——————————————————————————————
+/// 操作種別ごとのタブーリスト一式（テニュアの拡大・リセットを含む）
+///
+/// L1内 / L2内 / 層間 / 拗音面内 の4種を `OpKind` で添字づけして扱い、
+/// 操作種別を増やしても run() 側の分岐が増えないようにする。
+/// ——————————————————————————————
+struct TabuSet {
+    lists: [TabuList; NUM_OP_KINDS],
+    /// 設定値（リセット時に戻す基準）
+    base: [usize; NUM_OP_KINDS],
+    /// 現在のテニュア
+    cur: [usize; NUM_OP_KINDS],
+    /// 1回の拡大ステップ
+    step: [usize; NUM_OP_KINDS],
+    /// テニュア上限
+    max: [usize; NUM_OP_KINDS],
+}
+
+impl TabuSet {
+    /// 設定と拡大パラメータからタブーリスト一式を構築する
+    fn new(base: [usize; NUM_OP_KINDS], grow_period: usize, config: &SearchConfig) -> Self {
+        let step = base.map(|b| {
+            (b as f64 * (config.tenure_max_scale - 1.0) * config.tenure_grow_interval as f64
+                / grow_period as f64)
+                .ceil()
+                .max(1.0) as usize
+        });
+        let max = base.map(|b| (b as f64 * config.tenure_max_scale) as usize);
+        TabuSet {
+            lists: std::array::from_fn(|i| TabuList::new(base[i])),
+            base,
+            cur: base,
+            step,
+            max,
+        }
+    }
+
+    #[inline]
+    fn contains(&self, kind: OpKind, c1: CharId, c2: CharId) -> bool {
+        self.lists[kind as usize].contains(c1, c2)
+    }
+
+    #[inline]
+    fn add(&mut self, kind: OpKind, c1: CharId, c2: CharId) {
+        self.lists[kind as usize].add(c1, c2);
+    }
+
+    /// 現在のテニュアでリストを作り直す（内容は破棄される）
+    fn rebuild(&mut self) {
+        for (list, &cap) in self.lists.iter_mut().zip(self.cur.iter()) {
+            *list = TabuList::new(cap);
+        }
+    }
+
+    /// テニュアを設定値へ戻す（改善時）。
+    ///
+    /// テニュアが拡大されていた場合のみ作り直す。`rebuild()` は内容を破棄するので、
+    /// 「拡大されていたら中身ごとリセット、拡大されていなければ何もしない」という挙動になる。
+    fn reset(&mut self) {
+        if self.cur != self.base {
+            self.cur = self.base;
+            self.rebuild();
+        }
+    }
+
+    /// テニュアを設定値へ戻し、タブー内容を必ず破棄する（再起動時）。
+    ///
+    /// `reset()` と違い、テニュアが設定値のままでも作り直す。
+    fn reset_and_clear(&mut self) {
+        self.cur = self.base;
+        self.rebuild();
+    }
+
+    /// テニュアを1ステップ拡大する。上限未満のものがあれば作り直して true を返す。
+    fn grow(&mut self) -> bool {
+        let grew = self.cur.iter().zip(self.max.iter()).any(|(c, m)| c < m);
+        for i in 0..NUM_OP_KINDS {
+            self.cur[i] = (self.cur[i] + self.step[i]).min(self.max[i]);
+        }
+        if grew {
+            self.rebuild();
+        }
+        grew
+    }
+
+    /// ログ表示用の現在テニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
+    fn tenure_summary(&self, yoon: bool) -> String {
+        let mut s = format!(
+            "l1={} l2={} inter={}",
+            self.cur[OpKind::SwapL1 as usize],
+            self.cur[OpKind::SwapL2 as usize],
+            self.cur[OpKind::InterLayer as usize]
+        );
+        if yoon {
+            s.push_str(&format!(" yoon={}", self.cur[OpKind::SwapYoon as usize]));
+        }
+        s
+    }
+}
+
 #[inline]
 fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
     if a <= b {
@@ -75,8 +175,8 @@ const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
 const BITS_PER_WORD: usize = u64::BITS as usize;
 const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
-// dirty mask が u64 に収まることの静的検証
-const _: () = assert!(MAX_CHARS <= 64, "MAX_CHARS must be <= 64 for u64 dirty mask");
+// dirty mask が u128 に収まることの静的検証
+const _: () = assert!(MAX_CHARS <= 128, "MAX_CHARS must be <= 128 for u128 dirty mask");
 
 #[inline]
 fn pair_index(a: usize, b: usize) -> usize {
@@ -154,7 +254,12 @@ impl DeltaPairCache {
         d
     }
 
-    fn invalidate_dirty(&mut self, dirty: u64) {
+    /// dirty に含まれる文字が絡むペアのキャッシュを無効化する。
+    ///
+    /// `n_active` は実際に使われる CharId の上限（mode=none なら 64、hybrid なら
+    /// 64+npl）。MAX_CHARS ではなくこれで打ち切ることで、存在しない文字IDの
+    /// ペアを毎回クリアする無駄を省く。
+    fn invalidate_dirty(&mut self, dirty: u128, n_active: usize) {
         let mut bits = dirty;
         while bits != 0 {
             let c = bits.trailing_zeros() as usize;
@@ -162,7 +267,7 @@ impl DeltaPairCache {
             for other in 0..c {
                 bitset_clear(&mut self.valid, pair_index(other, c));
             }
-            for other in (c + 1)..MAX_CHARS {
+            for other in (c + 1)..n_active {
                 bitset_clear(&mut self.valid, pair_index(c, other));
             }
         }
@@ -173,19 +278,13 @@ impl DeltaPairCache {
     }
 }
 
-fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u64 {
-    let mut dirty = (1u64 << c1) | (1u64 << c2);
-    for &c in &[c1, c2] {
-        for &idx in &corpus.bigram_adj[c as usize] {
-            let bg = &corpus.bigrams[idx];
-            dirty |= (1u64 << bg.c1) | (1u64 << bg.c2);
-        }
-        for &idx in &corpus.trigram_adj[c as usize] {
-            let tg = &corpus.trigrams[idx];
-            dirty |= (1u64 << tg.c1) | (1u64 << tg.c2) | (1u64 << tg.c3);
-        }
-    }
-    dirty
+/// スワップ (c1, c2) でコストが変化しうる文字のビットマスク。
+///
+/// マスクはコーパスから決まりレイアウトに依存しないため、`Corpus::dirty_mask`
+/// に前計算済み。ここは2語の OR を取るだけ。
+#[inline]
+fn compute_dirty_mask(corpus: &Corpus, c1: CharId, c2: CharId) -> u128 {
+    corpus.dirty_mask[c1 as usize] | corpus.dirty_mask[c2 as usize]
 }
 
 /// ——————————————————————————————
@@ -219,19 +318,26 @@ pub struct SearchUpdate {
     pub best_score: f64,
     pub best_layout: Layout,
     pub phase: SearchPhase,
-    /// ユニグラム頻度（GUI の色分け・指負荷計算用）
-    pub unigrams: [f64; MAX_CHARS],
+    /// ユニグラム頻度（GUI の色分け・指負荷計算用）。
+    /// 探索中は不変なので Arc で共有し、更新ごとの配列コピーを避ける。
+    pub unigrams: Arc<[f64; MAX_CHARS]>,
 }
 
 /// ——————————————————————————————
 /// 操作の種類
 /// ——————————————————————————————
+/// 操作の種類。`TabuSet` の添字に使うため、判別子は 0 から連番であること。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpKind {
-    SwapL1,
-    SwapL2,
-    InterLayer,
+    SwapL1 = 0,
+    SwapL2 = 1,
+    InterLayer = 2,
+    /// 拗音面内スワップ（子音↔子音、子音↔void）。hybrid のみ。
+    SwapYoon = 3,
 }
+
+/// `OpKind` の種類数（`TabuSet` の配列長）
+const NUM_OP_KINDS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
@@ -293,6 +399,8 @@ pub struct SearchConfig {
     pub tabu_l1: usize,
     pub tabu_l2: usize,
     pub tabu_inter: usize,
+    /// 拗音面内スワップのタブーテニュア（hybrid のみ使用）
+    pub tabu_yoon: usize,
     pub inter_sample: usize,
     pub ab_sample_limit: usize,
     pub log_interval: usize,
@@ -312,6 +420,7 @@ impl Default for SearchConfig {
             tabu_l1: 15,
             tabu_l2: 15,
             tabu_inter: 25,
+            tabu_yoon: 15,
             inter_sample: 80,
             ab_sample_limit: 200,
             log_interval: 1_000,
@@ -366,42 +475,33 @@ pub fn run(
     let mut restarts = 0usize;
     let mut iter = 0usize;
 
-    let mut cur_tabu_l1 = config.tabu_l1;
-    let mut cur_tabu_l2 = config.tabu_l2;
-    let mut cur_tabu_inter = config.tabu_inter;
     let tenure_grow_start = (config.restart_after as f64 * config.tenure_grow_threshold) as usize;
     let grow_period = config
         .restart_after
         .saturating_sub(tenure_grow_start)
         .max(1);
-    let tenure_step_l1 = (config.tabu_l1 as f64
-        * (config.tenure_max_scale - 1.0)
-        * config.tenure_grow_interval as f64
-        / grow_period as f64)
-        .ceil()
-        .max(1.0) as usize;
-    let tenure_step_l2 = (config.tabu_l2 as f64
-        * (config.tenure_max_scale - 1.0)
-        * config.tenure_grow_interval as f64
-        / grow_period as f64)
-        .ceil()
-        .max(1.0) as usize;
-    let tenure_step_inter = (config.tabu_inter as f64
-        * (config.tenure_max_scale - 1.0)
-        * config.tenure_grow_interval as f64
-        / grow_period as f64)
-        .ceil()
-        .max(1.0) as usize;
-
-    let mut tabu_l1 = TabuList::new(cur_tabu_l1);
-    let mut tabu_l2 = TabuList::new(cur_tabu_l2);
-    let mut tabu_inter = TabuList::new(cur_tabu_inter);
+    let mut tabu = TabuSet::new(
+        [
+            config.tabu_l1,
+            config.tabu_l2,
+            config.tabu_inter,
+            config.tabu_yoon,
+        ],
+        grow_period,
+        config,
+    );
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
     let mut candidates: Vec<Candidate> =
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+    // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
+    let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
+    // 実際に使われる CharId の上限（キャッシュ無効化の走査範囲）
+    let n_active_chars = current.kp.yoon_char_range().end.max(current.kp.num_chars);
+    // 更新通知で共有するユニグラム頻度（探索中は不変）
+    let unigrams_shared = Arc::new(ctx.corpus.unigrams);
     let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
@@ -448,6 +548,20 @@ pub fn run(
             &mut pair_cache,
         );
 
+        // 拗音面内スワップ（hybrid のみ）
+        if current.kp.yoon {
+            generate_yoon_candidates(
+                &current,
+                ctx,
+                &yoon_chars,
+                config.ab_sample_limit,
+                rng,
+                &mut candidates,
+                &mut delta_buf,
+                &mut pair_cache,
+            );
+        }
+
         if candidates.is_empty() {
             break;
         }
@@ -460,11 +574,7 @@ pub fn run(
         let aspiration_threshold = best_score - current_score;
 
         for &cand in &candidates {
-            let is_tabu = match cand.kind {
-                OpKind::SwapL1 => tabu_l1.contains(cand.c1, cand.c2),
-                OpKind::SwapL2 => tabu_l2.contains(cand.c1, cand.c2),
-                OpKind::InterLayer => tabu_inter.contains(cand.c1, cand.c2),
-            };
+            let is_tabu = tabu.contains(cand.kind, cand.c1, cand.c2);
             if !is_tabu {
                 if best_free.is_none_or(|f| cand.delta < f.delta) {
                     best_free = Some(cand);
@@ -489,13 +599,9 @@ pub fn run(
         current_score += chosen.delta;
 
         let dirty = compute_dirty_mask(ctx.corpus, chosen.c1, chosen.c2);
-        pair_cache.invalidate_dirty(dirty);
+        pair_cache.invalidate_dirty(dirty, n_active_chars);
 
-        match chosen.kind {
-            OpKind::SwapL1 => tabu_l1.add(chosen.c1, chosen.c2),
-            OpKind::SwapL2 => tabu_l2.add(chosen.c1, chosen.c2),
-            OpKind::InterLayer => tabu_inter.add(chosen.c1, chosen.c2),
-        }
+        tabu.add(chosen.kind, chosen.c1, chosen.c2);
 
         if current_score < best_score {
             best_score = current_score;
@@ -507,47 +613,25 @@ pub fn run(
                 current_score,
                 best_score,
                 best_layout: best.clone(),
-                unigrams: ctx.corpus.unigrams,
+                unigrams: Arc::clone(&unigrams_shared),
                 phase: SearchPhase::Running,
             });
-            if cur_tabu_l1 != config.tabu_l1
-                || cur_tabu_l2 != config.tabu_l2
-                || cur_tabu_inter != config.tabu_inter
-            {
-                cur_tabu_l1 = config.tabu_l1;
-                cur_tabu_l2 = config.tabu_l2;
-                cur_tabu_inter = config.tabu_inter;
-                tabu_l1 = TabuList::new(cur_tabu_l1);
-                tabu_l2 = TabuList::new(cur_tabu_l2);
-                tabu_inter = TabuList::new(cur_tabu_inter);
-            }
+            tabu.reset();
         } else {
             no_improve += 1;
             if config.tenure_grow_interval > 0
                 && no_improve > tenure_grow_start
                 && (no_improve - tenure_grow_start).is_multiple_of(config.tenure_grow_interval)
             {
-                let max_l1 = (config.tabu_l1 as f64 * config.tenure_max_scale) as usize;
-                let max_l2 = (config.tabu_l2 as f64 * config.tenure_max_scale) as usize;
-                let max_inter = (config.tabu_inter as f64 * config.tenure_max_scale) as usize;
-                let grew =
-                    cur_tabu_l1 < max_l1 || cur_tabu_l2 < max_l2 || cur_tabu_inter < max_inter;
-                cur_tabu_l1 = (cur_tabu_l1 + tenure_step_l1).min(max_l1);
-                cur_tabu_l2 = (cur_tabu_l2 + tenure_step_l2).min(max_l2);
-                cur_tabu_inter = (cur_tabu_inter + tenure_step_inter).min(max_inter);
-                if grew {
-                    tabu_l1 = TabuList::new(cur_tabu_l1);
-                    tabu_l2 = TabuList::new(cur_tabu_l2);
-                    tabu_inter = TabuList::new(cur_tabu_inter);
-                }
+                tabu.grow();
             }
         }
 
         if config.log_interval > 0 && iter.is_multiple_of(config.log_interval) {
             let _ = writeln!(out,
-                "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure l1={} l2={} inter={}{}",
+                "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure {}{}",
                 iter, current_score, best_score, no_improve,
-                cur_tabu_l1, cur_tabu_l2, cur_tabu_inter,
+                tabu.tenure_summary(current.kp.yoon),
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
             on_update(&SearchUpdate {
@@ -556,7 +640,7 @@ pub fn run(
                 current_score,
                 best_score,
                 best_layout: best.clone(),
-                unigrams: ctx.corpus.unigrams,
+                unigrams: Arc::clone(&unigrams_shared),
                 phase: SearchPhase::Running,
             });
         }
@@ -580,12 +664,7 @@ pub fn run(
             current_score = score(&current, ctx.corpus, ctx.weights);
             pair_cache.invalidate_all();
 
-            cur_tabu_l1 = config.tabu_l1;
-            cur_tabu_l2 = config.tabu_l2;
-            cur_tabu_inter = config.tabu_inter;
-            tabu_l1 = TabuList::new(cur_tabu_l1);
-            tabu_l2 = TabuList::new(cur_tabu_l2);
-            tabu_inter = TabuList::new(cur_tabu_inter);
+            tabu.reset_and_clear();
 
             let _ = writeln!(
                 out,
@@ -598,7 +677,7 @@ pub fn run(
                 current_score,
                 best_score,
                 best_layout: best.clone(),
-                unigrams: ctx.corpus.unigrams,
+                unigrams: Arc::clone(&unigrams_shared),
                 phase: SearchPhase::Restarting,
             });
         }
@@ -628,7 +707,7 @@ pub fn run(
         current_score,
         best_score,
         best_layout: best,
-        unigrams: ctx.corpus.unigrams,
+        unigrams: Arc::clone(&unigrams_shared),
         phase: SearchPhase::Finished,
     };
     on_update(&final_update);
@@ -661,10 +740,70 @@ fn collect_l2_chars_into(layout: &Layout, out: &mut Vec<CharId>) {
     }
 }
 
-/// void文字（空きスロット代替）かどうか
+/// 操作D: 拗音面内スワップ候補を生成（hybrid のみ）
+///
+/// 少なくとも一方の端点を子音に限定する。void↔void のスワップは
+/// デルタが常に 0 の無操作で、候補枠とタブー枠を浪費するため除外する。
+#[allow(clippy::too_many_arguments)]
+fn generate_yoon_candidates(
+    layout: &Layout,
+    ctx: &SearchContext,
+    yoon_chars: &[CharId],
+    sample_limit: usize,
+    rng: &mut impl Rng,
+    out: &mut Vec<Candidate>,
+    buf: &mut DeltaScoreBuffer,
+    cache: &mut DeltaPairCache,
+) {
+    let k = layout.kp.num_consonants as usize;
+    let n = yoon_chars.len();
+    if k == 0 || n < 2 {
+        return;
+    }
+    // 子音を含むペア数 = 子音同士 + 子音×void
+    let max_pairs = k * (k - 1) / 2 + k * (n - k);
+
+    let push = |c1: CharId,
+                c2: CharId,
+                out: &mut Vec<Candidate>,
+                buf: &mut DeltaScoreBuffer,
+                cache: &mut DeltaPairCache| {
+        if swap_would_violate(layout, c1, c2, ctx.pairs) {
+            return;
+        }
+        let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
+        out.push(Candidate { kind: OpKind::SwapYoon, c1, c2, delta });
+    };
+
+    if max_pairs <= sample_limit {
+        // 全列挙: i は子音のみ、j は i より後ろの全拗音面文字
+        for i in 0..k {
+            for j in (i + 1)..n {
+                push(yoon_chars[i], yoon_chars[j], out, buf, cache);
+            }
+        }
+    } else {
+        let mut sampled = 0;
+        let mut tries = 0;
+        while sampled < sample_limit && tries < sample_limit * 4 {
+            tries += 1;
+            let i = rng.gen_range(0..k); // 必ず子音
+            let j = rng.gen_range(0..n);
+            if i == j {
+                continue;
+            }
+            push(yoon_chars[i], yoon_chars[j], out, buf, cache);
+            sampled += 1;
+        }
+    }
+}
+
+/// L1/L2 の void文字（空きスロット代替）かどうか
+///
+/// 拗音面の文字は含まない（`chars::is_l1l2_void` 参照）。
 #[inline]
 fn is_void(c: CharId) -> bool {
-    c >= VOID_CHAR_FIRST
+    is_l1l2_void(c)
 }
 
 /// 操作A/B: 同レイヤー内スワップの候補を生成
@@ -852,6 +991,20 @@ fn random_perturbation(
         }
         layout.swap_chars(c1, c2);
     }
+
+    // hybrid: 拗音面も撹乱する（少なくとも一方は子音。void↔void は無操作）
+    let k = kp.num_consonants as usize;
+    if kp.yoon && k > 0 {
+        let yoon_chars: Vec<CharId> = kp.yoon_char_range().map(|c| c as CharId).collect();
+        for _ in 0..n_swaps {
+            let c1 = yoon_chars[rng.gen_range(0..k)];
+            let c2 = *yoon_chars.choose(rng).unwrap();
+            if c1 == c2 || swap_would_violate(layout, c1, c2, pairs) {
+                continue;
+            }
+            layout.swap_chars(c1, c2);
+        }
+    }
 }
 
 /// ——————————————————————————————
@@ -864,6 +1017,19 @@ pub fn build_initial_layout(
     rng: &mut impl Rng,
     out: &mut impl Write,
 ) -> Layout {
+    // hybrid 未対応の初期配列モードはここで差し替える。
+    // （どのモードが拗音面に対応しているかを dispatch の直前に集約し、
+    //   下のログが「実際に使われたモード」を表示するようにする）
+    let mode = if kp.yoon && mode == InitialLayoutMode::UserDefined {
+        let _ = writeln!(
+            out,
+            "注意: user-defined 初期配列は hybrid 拗音面に未対応です → 2-263 を使用します"
+        );
+        InitialLayoutMode::Tsuki2_263
+    } else {
+        mode
+    };
+
     let layout = match mode {
         InitialLayoutMode::Tsuki2_263 => build_initial_2_263(ctx, kp, out),
         InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
@@ -884,6 +1050,65 @@ pub fn build_initial_layout(
     layout
 }
 
+/// hybrid: 拗音面（第3層）を構築する。
+///
+/// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
+/// 2. 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
+///    以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
+///
+/// mode=none では呼ばれない（呼び出し側で kp.yoon を確認する）。
+fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams) {
+    let npl = kp.num_slots_per_layer as usize;
+    let unigrams = &ctx.corpus.unigrams;
+
+    // 1. ゃゅょ を L1 へ移動
+    for &yc in &[crate::chars::YO_ID, crate::chars::YU_ID, crate::chars::YA_ID] {
+        if layout.is_l1(yc) {
+            continue;
+        }
+        // 最低頻度の可動 L1 基底文字を L2 へ退避
+        let target = (0..kp.num_chars as CharId)
+            .filter(|&c| {
+                layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c)
+            })
+            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
+        if let Some(t) = target {
+            layout.swap_chars(yc, t);
+        }
+    }
+
+    // 2. 子音を配置できる拗音面 physical（禁止位置を除く）を打鍵難易度の昇順で
+    let mut avail: Vec<usize> = (0..npl)
+        .filter(|&p| !yoon_physical_forbidden(layout, p as SlotId))
+        .collect();
+    let difficulty =
+        |p: usize| -> f64 { unigram_cost_for_slot(p as SlotId, ctx.weights) };
+    avail.sort_by(|&a, &b| difficulty(a).total_cmp(&difficulty(b)));
+
+    // 子音を頻度降順に
+    let k = kp.num_consonants as usize;
+    let mut cons: Vec<CharId> = (0..k as CharId).map(|i| CONSONANT_FIRST + i).collect();
+    cons.sort_by(|&a, &b| unigrams[b as usize].total_cmp(&unigrams[a as usize]));
+
+    // 子音を最良スロットへ
+    for (i, &c) in cons.iter().enumerate() {
+        let slot = (2 * npl + avail[i]) as SlotId;
+        layout.char_to_slot[c as usize] = slot;
+        layout.slot_to_char[slot as usize] = c;
+    }
+
+    // 残りの拗音面スロットに void を割り当てる
+    let mut void_id = CONSONANT_FIRST + kp.num_consonants;
+    for p in 0..npl {
+        let slot = 2 * npl + p;
+        if !kp.is_consonant(layout.slot_to_char[slot]) {
+            layout.char_to_slot[void_id as usize] = slot as SlotId;
+            layout.slot_to_char[slot] = void_id;
+            void_id += 1;
+        }
+    }
+}
+
 /// 頻度上位の文字をLayer 1へ配置（従来方式）
 fn build_initial_2_263(
     ctx: &SearchContext,
@@ -891,6 +1116,9 @@ fn build_initial_2_263(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    if kp.yoon {
+        setup_yoon_face(&mut layout, ctx, kp);
+    }
 
     let l1_char_slots = kp.num_slots_per_layer as usize
         - if kp.size == crate::layout::KeyboardSize::K3x11 {
@@ -961,6 +1189,7 @@ fn build_initial_user_defined(
     use crate::user_layout::{parse_user_layout, UserLayoutFile, USER_LAYOUT_PATH};
     use std::path::Path;
 
+
     let path = Path::new(USER_LAYOUT_PATH);
 
     let user_file = match UserLayoutFile::from_file(path) {
@@ -1021,6 +1250,9 @@ fn build_initial_random(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    if kp.yoon {
+        setup_yoon_face(&mut layout, ctx, kp);
+    }
 
     let movable: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| !is_fixed(c, kp) && !ctx.l1_only.contains(&c) && !is_void(c))
@@ -1064,7 +1296,7 @@ fn fix_exclusive_pair_violations(
             let l2_slot = l1_slot + npl;
             let l1_c = layout.slot_to_char[l1_slot];
             let l2_c = layout.slot_to_char[l2_slot];
-            if l1_c >= VOID_CHAR_FIRST || l2_c >= VOID_CHAR_FIRST {
+            if !is_base_kana(l1_c) || !is_base_kana(l2_c) {
                 continue;
             }
             if !ctx.pairs.iter().any(|p| p.violates(l1_c, l2_c)) {
@@ -1076,15 +1308,14 @@ fn fix_exclusive_pair_violations(
             'fix: for alt_l1_slot in 0..npl {
                 let alt_l2_slot = alt_l1_slot + npl;
                 let alt_l2_c = layout.slot_to_char[alt_l2_slot];
-                if alt_l2_c >= VOID_CHAR_FIRST || alt_l2_c == l2_c {
+                if !is_base_kana(alt_l2_c) || alt_l2_c == l2_c {
                     continue;
                 }
                 if ctx.pairs.iter().any(|p| p.violates(l1_c, alt_l2_c)) {
                     continue;
                 }
                 let alt_l1_c = layout.slot_to_char[alt_l1_slot];
-                if alt_l1_c != SHIFT_SLOT_SENTINEL
-                    && alt_l1_c < VOID_CHAR_FIRST
+                if is_base_kana(alt_l1_c)
                     && ctx.pairs.iter().any(|p| p.violates(alt_l1_c, l2_c))
                 {
                     continue;
@@ -1104,5 +1335,136 @@ fn fix_exclusive_pair_violations(
         if !any_violation {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chars::{YA_ID, YO_ID, YU_ID};
+    use crate::yoon::{YoonTable, DEFAULT_CONSONANTS};
+
+    const YOON_CORPUS: &str = "\
+        きゃきゅきょしゃしゅしょちゃちゅちょにゃにゅにょひゃひゅひょ\
+        みゃみゅみょりゃりゅりょぎゃぎゅぎょじゃじゅじょびゃびゅびょ\
+        ぴゃぴゅぴょきょうしょうじょうりょうびょうぎょうにゅうす\
+        しているのはたかいてにをとなっくれるさきこそうんおもちよけ";
+
+    fn hybrid_ctx_fixtures(
+        kp: KeyboardParams,
+    ) -> (Corpus, Weights, HashSet<CharId>, Vec<ExclusivePair>) {
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let corpus = Corpus::from_str_with_yoon(YOON_CORPUS, Some(&table));
+        let weights = Weights {
+            kp,
+            ..Default::default()
+        };
+        let mut l1_only: HashSet<CharId> = HashSet::new();
+        for c in [
+            crate::chars::DAKUTEN_ID,
+            crate::chars::HANDAKUTEN_ID,
+            YA_ID,
+            YU_ID,
+            YO_ID,
+        ] {
+            l1_only.insert(c);
+        }
+        (corpus, weights, l1_only, Vec::new())
+    }
+
+    /// レイアウトが有効か（全単射 + 拗音制約）を検証する
+    fn assert_valid_hybrid(layout: &Layout) {
+        let kp = layout.kp;
+        let npl = kp.num_slots_per_layer as usize;
+
+        // 全文字（基底非void + 拗音面）が全単射
+        let charset: Vec<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| is_base_kana(c))
+            .chain(kp.yoon_char_range().map(|c| c as CharId))
+            .collect();
+        for &c in &charset {
+            let s = layout.char_to_slot[c as usize];
+            assert_eq!(
+                layout.slot_to_char[s as usize], c,
+                "char {c} at slot {s} not bijective"
+            );
+        }
+
+        // ゃゅょ は L1
+        for yc in [YA_ID, YU_ID, YO_ID] {
+            assert!(layout.is_l1(yc), "ゃゅょ ({yc}) must be in L1");
+        }
+
+        // 子音は禁止物理位置（シフト/ゃゅょ）に置かれない
+        for c in 0..kp.num_consonants as CharId {
+            let cons = CONSONANT_FIRST + c;
+            let slot = layout.char_to_slot[cons as usize] as usize;
+            assert!(slot >= 2 * npl, "consonant {cons} must be in yoon layer");
+            let p = slot - 2 * npl;
+            assert!(
+                p != kp.shift_left as usize && p != kp.shift_right as usize,
+                "consonant {cons} on shift physical {p}"
+            );
+            assert!(
+                !crate::chars::is_yoon_shift_id(layout.slot_to_char[p]),
+                "consonant {cons} shares physical {p} with ゃゅょ"
+            );
+        }
+    }
+
+    fn run_hybrid_checks(base: KeyboardParams) {
+        let kp = base.with_yoon(((1u32 << 11) - 1) as u16).unwrap();
+        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(kp);
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let mut sink = Vec::new();
+        let layout = build_initial_2_263(&ctx, kp, &mut sink);
+        assert_valid_hybrid(&layout);
+        crate::cost::tests::verify_all_pairs(&layout, &corpus, &weights);
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_3x10() {
+        run_hybrid_checks(KeyboardParams::k3x10());
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_single_shift() {
+        run_hybrid_checks(KeyboardParams::k3x10_single_shift());
+    }
+
+    #[test]
+    fn test_hybrid_delta_all_pairs_3x11() {
+        run_hybrid_checks(KeyboardParams::k3x11());
+    }
+
+    #[test]
+    fn test_hybrid_swap_constraint() {
+        // 子音がある拗音物理位置へ ゃ を L1 スワップできない
+        let kp = KeyboardParams::k3x10().with_yoon(((1u32 << 11) - 1) as u16).unwrap();
+        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(kp);
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let mut sink = Vec::new();
+        let layout = build_initial_2_263(&ctx, kp, &mut sink);
+        let npl = kp.num_slots_per_layer as usize;
+
+        // 子音が乗っている物理位置を探し、その物理位置の L1 文字と ゃ の交換が違反すること
+        let cons0 = CONSONANT_FIRST;
+        let p = layout.char_to_slot[cons0 as usize] as usize - 2 * npl;
+        let l1_char_at_p = layout.slot_to_char[p];
+        // ゃ をその L1 位置へ動かす swap は違反する（子音がいるため）
+        assert!(
+            swap_would_violate(&layout, YA_ID, l1_char_at_p, &pairs),
+            "ゃ moving onto a consonant's physical key must violate"
+        );
     }
 }

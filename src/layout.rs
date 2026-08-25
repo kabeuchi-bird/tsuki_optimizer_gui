@@ -7,8 +7,10 @@ use crate::chars::{CharId, KUTEN_ID, MAX_CHARS, TOUTEN_ID, VOID_CHAR_FIRST};
 
 pub type SlotId = u8;
 
-/// スロット配列の上限サイズ（3x11: 66スロット）
-pub const MAX_SLOTS: usize = 66;
+/// スロット配列の上限サイズ。
+/// 3層構成（L1 / L2 / 拗音面）の 3x11: 33スロット × 3層 = 99スロット。
+/// `mode = "none"` では 2層分（60 or 66）のみ使用する。
+pub const MAX_SLOTS: usize = 99;
 
 /// シフトキースロットのセンチネル値（slot_to_char でシフトキー位置に使用）
 pub const SHIFT_SLOT_SENTINEL: CharId = u8::MAX;
@@ -52,6 +54,15 @@ pub struct KeyboardParams {
     /// 右手シフトキーのスロット（L2左手文字を打つ際に押す）
     /// 3x10: K_SLOT=17（右中指）、3x11: ★=18（row1,col7）
     pub shift_right: SlotId,
+
+    /// ハイブリッド拗音方式（第3層=拗音面）が有効か。
+    pub yoon: bool,
+    /// 拗音面の子音数（有効時のみ非0）。CharId は [CONSONANT_FIRST, +num_consonants)。
+    /// 残りの拗音面スロットは void（`is_yoon_void`）。
+    pub num_consonants: u8,
+    /// 子音レジストリの有効ビットマスク（表示ラベル "Ky" 等の復元用）。
+    /// `num_consonants == consonant_mask.count_ones()` が常に成り立つ。
+    pub consonant_mask: u16,
 }
 
 impl KeyboardParams {
@@ -65,6 +76,9 @@ impl KeyboardParams {
             num_chars: 60,
             shift_left: D_SLOT,  // 12
             shift_right: K_SLOT, // 17
+            yoon: false,
+            num_consonants: 0,
+            consonant_mask: 0,
         }
     }
 
@@ -82,6 +96,9 @@ impl KeyboardParams {
             num_chars: 60,
             shift_left: E_SHIFT_SLOT,  // 2（単一シフト）
             shift_right: E_SHIFT_SLOT, // 2（単一シフト）
+            yoon: false,
+            num_consonants: 0,
+            consonant_mask: 0,
         }
     }
 
@@ -98,8 +115,155 @@ impl KeyboardParams {
             num_chars: 64,
             shift_left: 13,  // ☆ (row1, col2)
             shift_right: 18, // ★ (row1, col7)
+            yoon: false,
+            num_consonants: 0,
+            consonant_mask: 0,
         }
     }
+
+    /// シフトキーの物理キー数（単一シフトは1、それ以外は2）。
+    pub fn num_shift_keys(&self) -> usize {
+        if self.shift_left == self.shift_right {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// 拗音面（第3層）を有効化した KeyboardParams を返す。
+    ///
+    /// `registry_mask` は `yoon::YoonTable::registry_mask()`（有効子音のビットマスク）。
+    /// 子音数はその popcount で決まるので、子音数とラベルマスクが食い違うことはない。
+    ///
+    /// 拗音面のスロットは全て文字（子音 or void）を持ち、センチネルは無い。
+    /// 子音を置けない物理位置は「同一物理キー排他」制約で void に固定される。
+    /// 内訳: シフトキー位置（前置シフトと衝突）が num_shift_keys 個、ゃゅょ の物理位置
+    /// （自己参照 [TT] を回避）が 3 個。
+    /// よって子音の最大数 = num_slots_per_layer − num_shift_keys − 3。
+    ///
+    /// 子音数が上限を超える場合は Err を返す。
+    pub fn with_yoon(mut self, registry_mask: u16) -> Result<Self, String> {
+        let npl = self.num_slots_per_layer as usize;
+        let num_consonants = registry_mask.count_ones() as usize;
+        let reserved = self.num_shift_keys() + 3;
+        let max_consonants = npl.checked_sub(reserved).ok_or_else(|| {
+            format!("拗音面のスロットが不足しています（層スロット {npl} < 予約 {reserved}）")
+        })?;
+        if num_consonants > max_consonants {
+            return Err(format!(
+                "子音数({})が拗音面の上限({})を超えています",
+                num_consonants, max_consonants
+            ));
+        }
+        self.yoon = true;
+        self.num_consonants = num_consonants as u8;
+        self.consonant_mask = registry_mask;
+        self.num_slots = npl * 3;
+        Ok(self)
+    }
+
+    /// 拗音面の文字数（子音 + void）。拗音面は全スロットが文字なので有効時は npl。
+    pub fn yoon_char_count(&self) -> usize {
+        if self.yoon {
+            self.num_slots_per_layer as usize
+        } else {
+            0
+        }
+    }
+
+    /// 拗音面 CharId 区間 [first, end)。無効時は空区間。
+    pub fn yoon_char_range(&self) -> std::ops::Range<usize> {
+        let first = crate::chars::CONSONANT_FIRST as usize;
+        first..(first + self.yoon_char_count())
+    }
+
+    /// スコア集計対象の全 CharId（基底文字 → 拗音面の順）。
+    ///
+    /// mode=none では拗音区間が空なので `0..num_chars` と完全に等価。
+    pub fn scored_chars(&self) -> impl Iterator<Item = CharId> + '_ {
+        (0..self.num_chars)
+            .chain(self.yoon_char_range())
+            .map(|c| c as CharId)
+    }
+
+    /// c が有効な子音 CharId か（このパラメータ下で）。
+    pub fn is_consonant(&self, c: CharId) -> bool {
+        let first = crate::chars::CONSONANT_FIRST;
+        self.yoon && c >= first && (c as usize) < first as usize + self.num_consonants as usize
+    }
+
+    /// c が拗音面の void CharId か。
+    pub fn is_yoon_void(&self, c: CharId) -> bool {
+        self.yoon && self.yoon_char_range().contains(&(c as usize)) && !self.is_consonant(c)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// レイヤーモデル（L1 / L2 / 拗音面）
+// ──────────────────────────────────────────────────────────────
+
+/// スロットが属するレイヤー。
+///
+/// スロット空間は `[L1 | L2 | 拗音面]` の3ブロックで、各ブロックは
+/// `num_slots_per_layer` 個の物理キーに対応する。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer {
+    /// Layer 1（1打）
+    L1,
+    /// Layer 2（前置シフト + 文字キーの2打）
+    L2,
+    /// 拗音面（子音1打。後置シフト ゃゅょ で到達）
+    Yoon,
+}
+
+/// スロットが属するレイヤーを返す。
+#[inline]
+pub fn layer_of(slot: SlotId, kp: KeyboardParams) -> Layer {
+    let npl = kp.num_slots_per_layer;
+    if slot < npl {
+        Layer::L1
+    } else if slot < 2 * npl {
+        Layer::L2
+    } else {
+        Layer::Yoon
+    }
+}
+
+/// スロットに対応する物理キー番号（0 〜 num_slots_per_layer-1）を返す。
+///
+/// どのレイヤーのスロットでも、そのキーを実際に押す物理位置に畳み込む。
+///
+/// `slot % npl` と等価だが、除算を避けて比較と減算で求める。
+/// この関数は `keystrokes_for_slot` 経由でデルタ評価の最内ループから呼ばれるため、
+/// 除算命令1つの差が実行時間に効く。
+#[inline]
+pub fn physical_of(slot: SlotId, kp: KeyboardParams) -> SlotId {
+    let npl = kp.num_slots_per_layer;
+    if slot < npl {
+        slot
+    } else if slot < 2 * npl {
+        slot - npl
+    } else {
+        slot - 2 * npl
+    }
+}
+
+/// 物理位置 p が前置シフトキー位置か。
+#[inline]
+pub fn is_shift_physical(kp: KeyboardParams, p: SlotId) -> bool {
+    p == kp.shift_left || p == kp.shift_right
+}
+
+/// 物理位置 p に子音を置けないか（拗音面の禁止スロット判定）。
+///
+/// 禁止されるのは以下の2種。初期配置（setup_yoon_face）とスワップ検証
+/// （yoon_swap_violates）が同じ不変条件を参照するための唯一の判定元。
+///   - 前置シフトキー位置（シフト打鍵と衝突する）
+///   - ゃゅょ の物理位置（[TT] のような自己参照を避ける）
+#[inline]
+pub fn yoon_physical_forbidden(layout: &Layout, p: SlotId) -> bool {
+    is_shift_physical(layout.kp, p)
+        || crate::chars::is_yoon_shift_id(layout.slot_to_char[p as usize])
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -192,20 +356,40 @@ impl Keystrokes {
 /// スロット番号からキーストロークを計算
 #[inline]
 pub fn keystrokes_for_slot(slot: SlotId, kp: KeyboardParams) -> Keystrokes {
-    if (slot as usize) < kp.num_slots_per_layer as usize {
+    let physical = physical_of(slot, kp);
+    match layer_of(slot, kp) {
         // Layer 1: そのスロットを1打鍵するだけ
-        Keystrokes::one(slot)
-    } else {
-        // Layer 2: 物理キー番号 = slot - num_slots_per_layer
-        let physical = slot - kp.num_slots_per_layer;
-        let col = slot_col(physical, kp.num_cols);
-        // 左手キー → 右シフト（★）、右手キー → 左シフト（☆）
-        let shift = if col < 5 {
-            kp.shift_right
-        } else {
-            kp.shift_left
-        };
-        Keystrokes::two(shift, physical)
+        Layer::L1 => Keystrokes::one(physical),
+        Layer::L2 => {
+            // 左手キー → 右シフト（★）、右手キー → 左シフト（☆）
+            let shift = if slot_col(physical, kp.num_cols) < 5 {
+                kp.shift_right
+            } else {
+                kp.shift_left
+            };
+            Keystrokes::two(shift, physical)
+        }
+        // 拗音面（子音）: その物理キーを1打。
+        // 直前のL1文字はキャンセルされるためコスト外（ゃゅょシフトは別文字として集計）。
+        Layer::Yoon => Keystrokes::one(physical),
+    }
+}
+
+/// 文字 c をスロット slot に置いたときの実打鍵数。
+///
+/// `Layout::char_stroke_count`（全体スコア）と `delta_score`（差分スコア）が
+/// 共有する唯一の実装。両者が食い違うとデルタ評価と再スコアが乖離するため、
+/// 打鍵数のルールはここ1箇所にまとめる。
+#[inline]
+pub fn stroke_count_for_slot(c: CharId, slot: SlotId, kp: KeyboardParams) -> i32 {
+    if punct_needs_enter(c, kp.size) {
+        return 2; // シフトキー + Enter
+    }
+    match layer_of(slot, kp) {
+        // L1 文字 / 拗音面の子音はともに1打
+        // （拗音シフト ゃゅょ は L1 の別文字として集計される）
+        Layer::L1 | Layer::Yoon => 1,
+        Layer::L2 => 2, // shift + key
     }
 }
 
@@ -316,10 +500,22 @@ impl Layout {
         self.slot_to_char[s2 as usize] = c1;
     }
 
+    /// c が属するレイヤー
+    #[inline]
+    pub fn layer_of_char(&self, c: CharId) -> Layer {
+        layer_of(self.char_to_slot[c as usize], self.kp)
+    }
+
     /// c が Layer 1 にいるか
     #[inline]
     pub fn is_l1(&self, c: CharId) -> bool {
-        (self.char_to_slot[c as usize] as usize) < self.kp.num_slots_per_layer as usize
+        self.layer_of_char(c) == Layer::L1
+    }
+
+    /// c が拗音面（第3層）にいるか（＝子音。hybrid のみ）
+    #[inline]
+    pub fn is_yoon_char(&self, c: CharId) -> bool {
+        self.kp.yoon && self.layer_of_char(c) == Layer::Yoon
     }
 
     /// 文字の「主手」（Layer 2なら文字キー側の手）
@@ -334,13 +530,7 @@ impl Layout {
     /// 3x11: 。/、は通常文字扱い（L1なら1打鍵、L2なら2打鍵）
     #[inline]
     pub fn char_stroke_count(&self, c: CharId) -> u32 {
-        if punct_needs_enter(c, self.kp.size) {
-            2 // シフトキー + Enter
-        } else if self.is_l1(c) {
-            1
-        } else {
-            2 // shift + key
-        }
+        stroke_count_for_slot(c, self.char_to_slot[c as usize], self.kp) as u32
     }
 
     /// 現在のレイアウトを表示する
@@ -396,6 +586,21 @@ impl Layout {
                 );
             }
             let _ = writeln!(out);
+        }
+        if self.kp.yoon {
+            // 拗音面（子音は "Ky" 等のトークン、void は ・）
+            let _ = writeln!(out, "【拗音面】（子音 + 拗音シフト ゃゅょ で1モーラ）");
+            for row in 0u8..3 {
+                let _ = write!(out, "  ");
+                for col in 0..nc {
+                    let slot = 2 * npl + (row as usize) * nc + col;
+                    let c = self.slot_to_char[slot];
+                    let label = crate::yoon::consonant_label(self.kp.consonant_mask, c)
+                        .unwrap_or("・");
+                    let _ = write!(out, "{:<3}", label);
+                }
+                let _ = writeln!(out);
+            }
         }
     }
 }
@@ -503,21 +708,57 @@ fn pair_violates_after_swap(
     pairs.iter().any(|p| p.violates(l1_c, l2_c))
 }
 
-/// スワップ (c1↔c2) が排他ペア制約に違反するか（影響する最大2スロット列を確認）
+/// 拗音方式の「同一物理キー排他」制約（ExclusivePair の層違い版）。
+///
+/// 拗音面 physical p に子音を置けるのは `yoon_physical_forbidden(p)` が偽のときのみ。
+/// スワップ (c1↔c2) 後にこの不変条件が破れるか判定する。
+///
+/// L1内スワップ（ゃゅょ移動）と拗音面内スワップ（子音移動）は層をまたがないため、
+/// 反対側の層は不変。よって現在の slot_to_char をそのまま参照できる。
+fn yoon_swap_violates(layout: &Layout, c1: CharId, c2: CharId) -> bool {
+    if !layout.kp.yoon {
+        return false;
+    }
+    let kp = layout.kp;
+    let npl = kp.num_slots_per_layer;
+    for &c in &[c1, c2] {
+        let new_slot = slot_after_swap(layout, c1, c2, c);
+        let physical = physical_of(new_slot, kp);
+        match layer_of(new_slot, kp) {
+            // ゃゅょ が L1 physical p へ → 拗音面 p が子音なら違反
+            Layer::L1
+                if crate::chars::is_yoon_shift_id(c)
+                    && kp.is_consonant(layout.slot_to_char[(2 * npl + physical) as usize]) =>
+            {
+                return true;
+            }
+            // 子音が拗音面 physical p へ → その物理位置が禁止なら違反
+            Layer::Yoon if kp.is_consonant(c) && yoon_physical_forbidden(layout, physical) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// スワップ (c1↔c2) が制約（排他ペア + 拗音同一物理キー排他）に違反するか
 pub fn swap_would_violate(
     layout: &Layout,
     c1: CharId,
     c2: CharId,
     pairs: &[ExclusivePair],
 ) -> bool {
+    if yoon_swap_violates(layout, c1, c2) {
+        return true;
+    }
     if pairs.is_empty() {
         return false;
     }
-    let npl = layout.kp.num_slots_per_layer as usize;
-    let s1 = layout.char_to_slot[c1 as usize] as usize;
-    let s2 = layout.char_to_slot[c2 as usize] as usize;
-    let l1_s1 = if s1 < npl { s1 } else { s1 - npl };
-    let l1_s2 = if s2 < npl { s2 } else { s2 - npl };
+    // 影響するのは c1 / c2 が乗る物理キーの L1/L2 列（最大2列）
+    let kp = layout.kp;
+    let l1_s1 = physical_of(layout.char_to_slot[c1 as usize], kp) as usize;
+    let l1_s2 = physical_of(layout.char_to_slot[c2 as usize], kp) as usize;
     pair_violates_after_swap(layout, c1, c2, l1_s1, pairs)
         || (l1_s2 != l1_s1 && pair_violates_after_swap(layout, c1, c2, l1_s2, pairs))
 }
@@ -551,6 +792,102 @@ mod tests {
         assert!(is_fixed(KUTEN_ID, kp));
         assert!(is_fixed(TOUTEN_ID, kp));
         assert!(!is_fixed(0, kp)); // 'そ' は固定ではない
+    }
+
+    /// 先頭 n ビットのレジストリマスク（テスト用に n 個の子音を有効化）
+    fn mask(n: u32) -> u16 {
+        ((1u32 << n) - 1) as u16
+    }
+
+    #[test]
+    fn test_with_yoon_params() {
+        // 拗音面は全スロットが文字。子音数はマスクの popcount で決まる。
+        // 3x10: 上限 = 30 − 2(D/K) − 3(ゃゅょ) = 25
+        let kp = KeyboardParams::k3x10().with_yoon(mask(11)).unwrap();
+        assert!(kp.yoon);
+        assert_eq!(kp.num_consonants, 11);
+        assert_eq!(kp.consonant_mask.count_ones(), 11); // 常に一致する
+        assert_eq!(kp.yoon_char_count(), 30); // 全スロットが文字
+        assert_eq!(kp.num_slots, 90); // 3 * 30
+                                      // 3x11 は層あたり33スロット
+        let k11 = KeyboardParams::k3x11().with_yoon(mask(11)).unwrap();
+        assert_eq!(k11.yoon_char_count(), 33);
+        assert_eq!(k11.num_slots, 99);
+        // マスク幅いっぱい（16種）でも全キーボードで収まる
+        // ＝ 子音上限（3x10 で 25、単一シフトで 26、3x11 で 28）は u16 マスクでは
+        //    到達不能。with_yoon の上限チェックはレジストリ拡張に備えた防御。
+        for base in [
+            KeyboardParams::k3x10(),
+            KeyboardParams::k3x10_single_shift(),
+            KeyboardParams::k3x11(),
+        ] {
+            let full = base.with_yoon(u16::MAX).unwrap();
+            assert_eq!(full.num_consonants, 16);
+            assert!(full.num_consonants as usize <= base.num_slots_per_layer as usize - 5);
+        }
+    }
+
+    #[test]
+    fn test_yoon_char_predicates() {
+        let kp = KeyboardParams::k3x10().with_yoon(mask(2)).unwrap();
+        let first = crate::chars::CONSONANT_FIRST;
+        assert!(kp.is_consonant(first));
+        assert!(kp.is_consonant(first + 1));
+        assert!(!kp.is_consonant(first + 2)); // 3個目は無効
+        assert!(kp.is_yoon_void(first + 2)); // void 区間
+        assert!(!kp.is_consonant(0)); // 基底文字は子音でない
+                                      // yoon 無効時は常に false
+        let plain = KeyboardParams::k3x10();
+        assert!(!plain.is_consonant(first));
+        assert!(!plain.is_yoon_void(first));
+    }
+
+    #[test]
+    fn test_yoon_stroke_counts() {
+        // 拗音ユニットの打鍵数: きゃ=2, きょう=3, ぎょう=3
+        let map = crate::chars::build_char_to_id();
+        let kp = KeyboardParams::k3x10().with_yoon(mask(2)).unwrap();
+        let ky = crate::chars::CONSONANT_FIRST; // 64
+        let gy = crate::chars::CONSONANT_FIRST + 1; // 65
+        let npl = kp.num_slots_per_layer;
+
+        let mut layout = Layout::initial(kp);
+        // ゃ を L1 へ移動（slot0 の文字と交換）
+        let ya = map[&'ゃ'];
+        let displaced = layout.slot_to_char[0];
+        layout.swap_chars(ya, displaced);
+        // 子音 Ky, Gy を拗音面スロットへ配置
+        for (cons, phys) in [(ky, 3u8), (gy, 5u8)] {
+            let slot = 2 * npl + phys;
+            layout.char_to_slot[cons as usize] = slot;
+            layout.slot_to_char[slot as usize] = cons;
+        }
+
+        let yo = map[&'ょ']; // slot 4 (L1)
+        let u = map[&'う']; // slot 16 (L1)
+
+        // 個別打鍵数
+        assert_eq!(layout.char_stroke_count(ya), 1); // ゃ は L1
+        assert_eq!(layout.char_stroke_count(yo), 1); // ょ は L1
+        assert_eq!(layout.char_stroke_count(u), 1); // う は L1
+        assert_eq!(layout.char_stroke_count(ky), 1); // 子音は1打
+        assert_eq!(layout.char_stroke_count(gy), 1);
+        assert!(layout.is_yoon_char(ky));
+        assert!(!layout.is_yoon_char(ya));
+
+        // ユニット合計
+        let kya = layout.char_stroke_count(ky) + layout.char_stroke_count(ya);
+        let kyou =
+            layout.char_stroke_count(ky) + layout.char_stroke_count(yo) + layout.char_stroke_count(u);
+        let gyou =
+            layout.char_stroke_count(gy) + layout.char_stroke_count(yo) + layout.char_stroke_count(u);
+        assert_eq!(kya, 2, "きゃ");
+        assert_eq!(kyou, 3, "きょう");
+        assert_eq!(gyou, 3, "ぎょう");
+
+        // 拗音面スロットは1打（物理キー）
+        let ks = keystrokes_for_slot(2 * npl + 3, kp);
+        assert_eq!(ks.as_slice(), &[3]);
     }
 
     #[test]

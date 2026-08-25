@@ -8,6 +8,7 @@ use crate::chars::{self, CharId, MAX_CHARS};
 use crate::cost::Weights;
 use crate::layout::{ExclusivePair, KeyboardParams, KeyboardSize};
 use crate::search::{InitialLayoutMode, SearchConfig};
+use crate::yoon::YoonMode;
 
 // ──────────────────────────────────────
 // TOMLファイルのトップレベル構造
@@ -23,6 +24,8 @@ pub struct Config {
     pub slot_difficulty: SlotDifficultyConfig,
     #[serde(default)]
     pub constraints: ConstraintsConfig,
+    #[serde(default)]
+    pub yoon: YoonConfig,
 }
 
 // ──────────────────────────────────────
@@ -39,6 +42,7 @@ pub struct RunConfig {
     pub tabu_l1: Option<usize>,
     pub tabu_l2: Option<usize>,
     pub tabu_inter: Option<usize>,
+    pub tabu_yoon: Option<usize>,
     pub inter_sample: Option<usize>,
     pub ab_sample_limit: Option<usize>,
     pub log_interval: Option<usize>,
@@ -106,6 +110,14 @@ impl Config {
         }
     }
 
+    /// yoon.mode 設定から YoonMode を生成する（未指定は None）
+    pub fn build_yoon_mode(&self) -> YoonMode {
+        match self.yoon.mode.as_deref() {
+            Some(s) => YoonMode::from_config_str(s),
+            None => YoonMode::None,
+        }
+    }
+
     /// デフォルト値と設定ファイルの内容をマージして SearchConfig を生成する
     pub fn build_search_config(&self) -> SearchConfig {
         let r = &self.run;
@@ -117,6 +129,7 @@ impl Config {
             tabu_l1: r.tabu_l1.unwrap_or(d.tabu_l1),
             tabu_l2: r.tabu_l2.unwrap_or(d.tabu_l2),
             tabu_inter: r.tabu_inter.unwrap_or(d.tabu_inter),
+            tabu_yoon: r.tabu_yoon.unwrap_or(d.tabu_yoon),
             inter_sample: r.inter_sample.unwrap_or(d.inter_sample),
             ab_sample_limit: r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
             log_interval: r.log_interval.unwrap_or(d.log_interval),
@@ -200,6 +213,19 @@ pub struct ExclusivePairConfig {
     pub group_a: String,
     /// 制約グループB（かな文字列、例: "きしちにひみり"）
     pub group_b: String,
+}
+
+// ──────────────────────────────────────
+// [yoon] セクション（ハイブリッド拗音方式）
+// ──────────────────────────────────────
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct YoonConfig {
+    /// 拗音方式: "none"（デフォルト・既存動作）/ "hybrid"
+    pub mode: Option<String>,
+    /// 子音セット（トークン連結、例: "KyGyShJChNyHyByPyMyRy"）。
+    /// 省略時は必須11種。後続ステージで解釈される。
+    pub consonants: Option<String>,
 }
 
 // 濁音になりうる音すべて ＋ 濁点
