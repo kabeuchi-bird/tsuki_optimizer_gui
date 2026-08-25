@@ -178,7 +178,7 @@ impl Corpus {
             unigrams[i] = c as f64 / total;
         }
 
-        let bigrams: Vec<BigramEntry> = bi_count
+        let mut bigrams: Vec<BigramEntry> = bi_count
             .iter()
             .map(|(&(c1, c2), &cnt)| BigramEntry {
                 c1,
@@ -187,7 +187,7 @@ impl Corpus {
             })
             .collect();
 
-        let trigrams: Vec<TrigramEntry> = tri_count
+        let mut trigrams: Vec<TrigramEntry> = tri_count
             .iter()
             .map(|(&(c1, c2, c3), &cnt)| TrigramEntry {
                 c1,
@@ -196,6 +196,13 @@ impl Corpus {
                 freq: cnt as f64 / total,
             })
             .collect();
+
+        // HashMap のイテレーション順はプロセスごとに変わる（RandomState）。そのままだと
+        // n-gram ベクタの並びが実行ごとに変化し、浮動小数点の加算順序が変わって
+        // スコアが ULP 単位でぶれる。まれに候補比較が反転して探索経路ごと分岐し、
+        // 同じ seed でも結果が再現しなくなるため、ここで並びを確定させる。
+        bigrams.sort_unstable_by_key(|b| (b.c1, b.c2));
+        trigrams.sort_unstable_by_key(|t| (t.c1, t.c2, t.c3));
 
         let bigram_adj = Self::build_bigram_adj(&bigrams);
         let trigram_adj = Self::build_trigram_adj(&trigrams);
@@ -383,6 +390,27 @@ mod tests {
         assert!(corpus.unigrams[map[&'て'] as usize] > 0.0);
         // ゃ 単独はユニグラムに現れない（スキップ）
         assert_eq!(corpus.unigrams[map[&'ゃ'] as usize], 0.0);
+    }
+
+    #[test]
+    fn test_ngrams_are_deterministically_ordered() {
+        // HashMap のイテレーション順はプロセスごとに変わるため、n-gram ベクタは
+        // 明示的にソートして順序を固定している。これが崩れると同じ seed でも
+        // 浮動小数点の加算順序が変わり、探索結果が再現しなくなる。
+        let corpus = Corpus::from_str("しているのはたかいてにをとなっくれるさきこそうんおもちよけ");
+        assert!(corpus.bigrams.len() > 1);
+        assert!(
+            corpus.bigrams.windows(2).all(|w| (w[0].c1, w[0].c2) <= (w[1].c1, w[1].c2)),
+            "bigrams が (c1,c2) 昇順でない"
+        );
+        assert!(corpus.trigrams.len() > 1);
+        assert!(
+            corpus
+                .trigrams
+                .windows(2)
+                .all(|w| (w[0].c1, w[0].c2, w[0].c3) <= (w[1].c1, w[1].c2, w[1].c3)),
+            "trigrams が (c1,c2,c3) 昇順でない"
+        );
     }
 
     #[test]
