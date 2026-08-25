@@ -763,16 +763,21 @@ fn generate_yoon_candidates(
     // 子音を含むペア数 = 子音同士 + 子音×void
     let max_pairs = k * (k - 1) / 2 + k * (n - k);
 
+    // 除外（無操作ペア・制約違反）のときは false を返す。呼び出し側はこれを見て
+    // sample_limit の消費対象から外す（除外分もカウントすると、無操作ペアが多い
+    // ときに実候補が sample_limit より大幅に少ないまま探索が打ち切られてしまう）。
     let push = |c1: CharId,
                 c2: CharId,
                 out: &mut Vec<Candidate>,
                 buf: &mut DeltaScoreBuffer,
-                cache: &mut DeltaPairCache| {
+                cache: &mut DeltaPairCache|
+     -> bool {
         if skip_inert_pair(layout, ctx.corpus, c1, c2) || swap_would_violate(layout, c1, c2, ctx.pairs) {
-            return;
+            return false;
         }
         let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
         out.push(Candidate { kind: OpKind::SwapYoon, c1, c2, delta });
+        true
     };
 
     if max_pairs <= sample_limit {
@@ -792,8 +797,9 @@ fn generate_yoon_candidates(
             if i == j {
                 continue;
             }
-            push(yoon_chars[i], yoon_chars[j], out, buf, cache);
-            sampled += 1;
+            if push(yoon_chars[i], yoon_chars[j], out, buf, cache) {
+                sampled += 1;
+            }
         }
     }
 }
