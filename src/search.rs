@@ -768,7 +768,7 @@ fn generate_yoon_candidates(
                 out: &mut Vec<Candidate>,
                 buf: &mut DeltaScoreBuffer,
                 cache: &mut DeltaPairCache| {
-        if swap_would_violate(layout, c1, c2, ctx.pairs) {
+        if skip_inert_pair(layout, ctx.corpus, c1, c2) || swap_would_violate(layout, c1, c2, ctx.pairs) {
             return;
         }
         let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
@@ -806,6 +806,27 @@ fn is_void(c: CharId) -> bool {
     is_l1l2_void(c)
 }
 
+/// 候補から除外すべき「スコアが必ず変化しない」ペアか（hybrid のみ）。
+///
+/// 両端ともコーパス出現頻度0の文字なら、どの n-gram にも現れない（n-gram はユニグラムと
+/// 同じセグメントから集計されるため）ので、入れ替えてもスコアは数学的に必ず変化しない。
+///
+/// この「必ず delta == 0」の候補は、収束後には他の候補（すべて悪化＝正の delta）に
+/// 常に勝つため、探索が無限のプラトーに捕まる。実測（同梱コーパス・5万反復）では
+/// 採択の98%がこれに費やされ、拗音面の実改善は63回しか出せていなかった。除外すると
+/// 2095回まで増え、8シード中6シードでスコアが改善する。
+///
+/// ただし none では逆に悪化する（8シード中3シードしか勝てない）。デルタ0の移動は
+/// レイアウトを変えないままタブーリストだけを経過させる「待ち」として働いており、
+/// none ではその多様化効果の方が勝るため。よって拗音面という競合する操作種別を
+/// 持つ hybrid に限定して適用する。
+#[inline]
+fn skip_inert_pair(layout: &Layout, corpus: &Corpus, c1: CharId, c2: CharId) -> bool {
+    layout.kp.yoon
+        && corpus.unigrams[c1 as usize] == 0.0
+        && corpus.unigrams[c2 as usize] == 0.0
+}
+
 /// 操作A/B: 同レイヤー内スワップの候補を生成
 #[allow(clippy::too_many_arguments)]
 fn generate_swap_candidates(
@@ -829,7 +850,9 @@ fn generate_swap_candidates(
         for i in 0..n {
             for j in i + 1..n {
                 let (c1, c2) = (chars[i], chars[j]);
-                if swap_would_violate(layout, c1, c2, ctx.pairs) {
+                if skip_inert_pair(layout, ctx.corpus, c1, c2)
+                    || swap_would_violate(layout, c1, c2, ctx.pairs)
+                {
                     continue;
                 }
                 let delta =
@@ -853,7 +876,9 @@ fn generate_swap_candidates(
                 continue;
             }
             let (c1, c2) = (chars[i], chars[j]);
-            if swap_would_violate(layout, c1, c2, ctx.pairs) {
+            if skip_inert_pair(layout, ctx.corpus, c1, c2)
+                || swap_would_violate(layout, c1, c2, ctx.pairs)
+            {
                 continue;
             }
             let delta = cache.get_or_compute(c1, c2, layout, ctx.corpus, ctx.weights, buf);
@@ -1077,22 +1102,47 @@ fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams)
         }
     }
 
-    // 2. 子音を配置できる拗音面 physical（禁止位置を除く）を打鍵難易度の昇順で
+    // 2. 子音を配置できる拗音面 physical（禁止位置を除く）
     let mut avail: Vec<usize> = (0..npl)
         .filter(|&p| !yoon_physical_forbidden(layout, p as SlotId))
         .collect();
-    let difficulty =
-        |p: usize| -> f64 { unigram_cost_for_slot(p as SlotId, ctx.weights) };
-    avail.sort_by(|&a, &b| difficulty(a).total_cmp(&difficulty(b)));
 
     // 子音を頻度降順に
     let k = kp.num_consonants as usize;
     let mut cons: Vec<CharId> = (0..k as CharId).map(|i| CONSONANT_FIRST + i).collect();
     cons.sort_by(|&a, &b| unigrams[b as usize].total_cmp(&unigrams[a as usize]));
 
-    // 子音を最良スロットへ
-    for (i, &c) in cons.iter().enumerate() {
-        let slot = (2 * npl + avail[i]) as SlotId;
+    // 子音は方式の定義上ちょうど100%が ゃ/ゅ/ょ に続かれるため、スロット難易度だけで
+    // 決めるとバイグラム（子音→拗音シフト）を取りこぼす。拗音面ではこの遷移コストの
+    // 方が難易度より支配的なので、両方を頻度で重み付けした合計コストで貪欲に割り当てる。
+    let shift_slots: Vec<(CharId, SlotId)> = crate::chars::YOON_SHIFT_IDS
+        .iter()
+        .map(|&sid| (sid, layout.char_to_slot[sid as usize]))
+        .collect();
+    let placement_cost = |c: CharId, p: usize| -> f64 {
+        let freq = unigrams[c as usize];
+        let mut cost = freq * unigram_cost_for_slot(p as SlotId, ctx.weights);
+        for &(sid, s_slot) in &shift_slots {
+            let bf = crate::cost::lookup_bigram_freq(ctx.corpus, c, sid);
+            if bf > 0.0 {
+                cost += bf * crate::cost::key_pair_cost(p as SlotId, s_slot, ctx.weights);
+            }
+        }
+        cost
+    };
+
+    // 頻度の高い子音から、残っているスロットのうち合計コスト最小の位置へ
+    for &c in &cons {
+        let Some((idx, _)) = avail
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (i, placement_cost(c, p)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+        else {
+            break;
+        };
+        let p = avail.swap_remove(idx);
+        let slot = (2 * npl + p) as SlotId;
         layout.char_to_slot[c as usize] = slot;
         layout.slot_to_char[slot as usize] = c;
     }
@@ -1440,6 +1490,32 @@ mod tests {
     #[test]
     fn test_hybrid_delta_all_pairs_3x11() {
         run_hybrid_checks(KeyboardParams::k3x11());
+    }
+
+    #[test]
+    fn test_skip_inert_pair_gated_and_correct() {
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let corpus = Corpus::from_str_with_yoon(YOON_CORPUS, Some(&table));
+
+        // 頻度0どうし（拗音面の void 同士）は hybrid で除外される
+        let kp = KeyboardParams::k3x10()
+            .with_yoon(table.registry_mask())
+            .unwrap();
+        let layout = Layout::initial(kp);
+        let v1 = CONSONANT_FIRST + kp.num_consonants;
+        let v2 = v1 + 1;
+        assert_eq!(corpus.unigrams[v1 as usize], 0.0);
+        assert!(skip_inert_pair(&layout, &corpus, v1, v2));
+
+        // 片方でも頻度があれば除外しない
+        let used = (0..kp.num_chars as CharId)
+            .find(|&c| corpus.unigrams[c as usize] > 0.0)
+            .expect("出現する文字が1つはある");
+        assert!(!skip_inert_pair(&layout, &corpus, v1, used));
+
+        // none では常に false（デフォルト経路の挙動を変えない）
+        let plain = Layout::initial(KeyboardParams::k3x10());
+        assert!(!skip_inert_pair(&plain, &corpus, v1, v2));
     }
 
     #[test]
