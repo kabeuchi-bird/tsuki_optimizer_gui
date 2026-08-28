@@ -1081,6 +1081,61 @@ pub fn build_initial_layout(
     layout
 }
 
+/// `l1_only` 指定の文字を Layer 1 へ引き上げる。
+///
+/// `l1_only` は「L1 から出さない」制約としてのみ実装されており（`is_inter_layer_movable`
+/// が false を返す）、初期配置で L2 にいる文字を L1 へ入れる処理はどこにもなかった。
+/// そのため初期レイヤーが L2 の文字（CharId 30..60）を `l1_only` に指定すると、
+/// 昇格候補にも層間スワップ候補にもならず、L2 に固定されたまま制約が黙って破られていた。
+///
+/// ここで L1 の最低頻度の可動文字と交換して引き上げ、以降の
+/// `is_inter_layer_movable` による凍結が「L1 に居続ける」意味になるようにする。
+///
+/// 交換相手が尽きた場合（L1 が固定文字で埋まっている等）は、引き上げられなかった
+/// 文字を返す。呼び出し側で警告を出すために使う。
+fn promote_l1_only_chars(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+) -> Vec<CharId> {
+    let unigrams = &ctx.corpus.unigrams;
+    // 頻度の低い文字から引き上げると、交換相手（L1 の最低頻度文字）を先に消費して
+    // しまうため、頻度の高い文字から順に処理する
+    let mut pending: Vec<CharId> = (0..kp.num_chars as CharId)
+        .filter(|&c| ctx.l1_only.contains(&c) && !is_void(c) && !layout.is_l1(c))
+        .collect();
+    pending.sort_unstable_by(|&a, &b| unigrams[b as usize].total_cmp(&unigrams[a as usize]));
+
+    let mut failed = Vec::new();
+    for c in pending {
+        // 交換相手: L1 にいる可動文字のうち最低頻度のもの
+        let target = (0..kp.num_chars as CharId)
+            .filter(|&t| {
+                layout.is_l1(t) && is_inter_layer_movable(t, kp, ctx.l1_only) && !is_void(t)
+            })
+            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
+        match target {
+            Some(t) => layout.swap_chars(c, t),
+            None => failed.push(c),
+        }
+    }
+    failed
+}
+
+/// `promote_l1_only_chars` が引き上げられなかった文字を警告する。
+fn warn_unpromoted(failed: Vec<CharId>, out: &mut impl Write) {
+    if failed.is_empty() {
+        return;
+    }
+    use crate::chars::CHAR_LIST;
+    let names: String = failed.iter().map(|&c| CHAR_LIST[c as usize]).collect();
+    let _ = writeln!(
+        out,
+        "警告: l1_only の文字 '{}' を Layer 1 へ引き上げられませんでした（L1に交換可能な文字がありません）。",
+        names
+    );
+}
+
 /// hybrid: 拗音面（第3層）を構築する。
 ///
 /// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
@@ -1092,21 +1147,9 @@ fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams)
     let npl = kp.num_slots_per_layer as usize;
     let unigrams = &ctx.corpus.unigrams;
 
-    // 1. ゃゅょ を L1 へ移動
-    for &yc in &[crate::chars::YO_ID, crate::chars::YU_ID, crate::chars::YA_ID] {
-        if layout.is_l1(yc) {
-            continue;
-        }
-        // 最低頻度の可動 L1 基底文字を L2 へ退避
-        let target = (0..kp.num_chars as CharId)
-            .filter(|&c| {
-                layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c)
-            })
-            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
-        if let Some(t) = target {
-            layout.swap_chars(yc, t);
-        }
-    }
+    // 1. ゃゅょ の L1 への引き上げは promote_l1_only_chars が担う
+    //    （hybrid では YoonSetup::extend_l1_only が ゃゅょ を l1_only に入れている）。
+    //    ここに来た時点で L1 にいることを前提に、以降で禁止スロットを判定する。
 
     // 2. 子音を配置できる拗音面 physical（禁止位置を除く）
     let mut avail: Vec<usize> = (0..npl)
@@ -1172,6 +1215,9 @@ fn build_initial_2_263(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    // l1_only の文字を先に L1 へ引き上げる。拗音面の禁止スロット判定は
+    // ゃゅょ が L1 にいることを前提にするため、setup_yoon_face より前に行う。
+    warn_unpromoted(promote_l1_only_chars(&mut layout, ctx, kp), out);
     if kp.yoon {
         setup_yoon_face(&mut layout, ctx, kp);
     }
@@ -1183,8 +1229,12 @@ fn build_initial_2_263(
             0
         };
 
+    // 引き上げ後の実際の配置を数える。引き上げに失敗した文字を「L1を占める」と
+    // 数えると L1 の空き枠を過少に見積もり、昇格すべき高頻度文字を弾いてしまう。
     let l1_fixed_count = (0..kp.num_chars as CharId)
-        .filter(|&c| !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)))
+        .filter(|&c| {
+            !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)) && layout.is_l1(c)
+        })
         .count();
     if l1_fixed_count > l1_char_slots {
         let _ = writeln!(
@@ -1306,6 +1356,7 @@ fn build_initial_random(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    warn_unpromoted(promote_l1_only_chars(&mut layout, ctx, kp), out);
     if kp.yoon {
         setup_yoon_face(&mut layout, ctx, kp);
     }
@@ -1522,6 +1573,47 @@ mod tests {
         // none では常に false（デフォルト経路の挙動を変えない）
         let plain = Layout::initial(KeyboardParams::k3x10());
         assert!(!skip_inert_pair(&plain, &corpus, v1, v2));
+    }
+
+    #[test]
+    fn test_l1_only_chars_are_promoted_to_l1() {
+        // l1_only は「L1 から出さない」制約でしかなく、初期配置が L2 の文字を
+        // L1 へ入れる処理が無かったため、指定しても黙って L2 に残っていた。
+        use crate::chars::build_char_to_id;
+        let map = build_char_to_id();
+        let corpus = Corpus::from_str(YOON_CORPUS);
+        let kp = KeyboardParams::k3x10();
+        let weights = Weights { kp, ..Default::default() };
+
+        // 'ー'(CharId 58) と 'を'(41) は初期配置が L2
+        let l2_start = [map[&'ー'], map[&'を']];
+        let plain = Layout::initial(kp);
+        for &c in &l2_start {
+            assert!(!plain.is_l1(c), "前提: CharId {c} は初期 L2");
+        }
+
+        let mut l1_only: HashSet<CharId> = HashSet::new();
+        l1_only.insert(crate::chars::DAKUTEN_ID);
+        l1_only.extend(l2_start);
+        let pairs: Vec<ExclusivePair> = Vec::new();
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+
+        for mode in [InitialLayoutMode::Tsuki2_263, InitialLayoutMode::Random] {
+            let mut rng = SmallRng::seed_from_u64(1);
+            let mut sink = Vec::new();
+            let layout = build_initial_layout(&ctx, kp, mode, &mut rng, &mut sink);
+            for &c in &l1_only {
+                assert!(
+                    layout.is_l1(c),
+                    "{mode:?}: l1_only の CharId {c} が L1 にいない"
+                );
+            }
+        }
     }
 
     #[test]
