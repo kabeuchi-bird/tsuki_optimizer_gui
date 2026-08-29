@@ -50,6 +50,8 @@ pub struct RunConfig {
     pub tenure_grow_threshold: Option<f64>,
     pub tenure_grow_interval: Option<usize>,
     pub tenure_max_scale: Option<f64>,
+    /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
+    pub diversification: Option<f64>,
 
     /// キーボードサイズ: "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
     pub keyboard_size: Option<String>,
@@ -137,6 +139,7 @@ impl Config {
             tenure_grow_threshold: r.tenure_grow_threshold.unwrap_or(d.tenure_grow_threshold),
             tenure_grow_interval: r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
             tenure_max_scale: r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
+            diversification: r.diversification.unwrap_or(d.diversification),
             initial_layout_mode: self.build_initial_layout_mode(),
         }
     }

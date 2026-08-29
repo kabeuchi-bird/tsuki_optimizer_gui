@@ -161,6 +161,59 @@ impl TabuSet {
     }
 }
 
+/// ——————————————————————————————
+/// 頻度ベース長期記憶（多様化）
+///
+/// タブーリストは「直近 N 手」という短期記憶しか持たない。この実装には探索全体を
+/// 通じた長期記憶が無く、停滞時に「まだ試していない方向」へ誘導する仕組みが無かった。
+///
+/// 実測では 5万反復のうち実改善は約600回で、残りはスコアが変化しないスワップに
+/// 費やされていた。タブーサーチが盆地を脱出する仕組みは「一番マシな悪化手を選んで
+/// 山を登る」ことだが、デルタ0の手が常に供給されるため一度も山を登れていなかった。
+///
+/// ここでは各スワップペアの適用回数を数え、停滞時に「よく使った手」へペナルティを
+/// 課すことで、山登りの方向を未探索側へ向ける。
+/// ——————————————————————————————
+struct MoveFrequency {
+    /// pair_index -> そのペアが適用された回数
+    counts: Vec<u32>,
+    /// 正規化用（ペナルティを [0, coef] に収めるため）
+    max_count: u32,
+}
+
+impl MoveFrequency {
+    fn new() -> Self {
+        MoveFrequency {
+            counts: vec![0; NUM_PAIRS],
+            max_count: 0,
+        }
+    }
+
+    #[inline]
+    fn record(&mut self, c1: CharId, c2: CharId) {
+        let (a, b) = normalize_pair(c1, c2);
+        let idx = pair_index(a as usize, b as usize);
+        self.counts[idx] += 1;
+        if self.counts[idx] > self.max_count {
+            self.max_count = self.counts[idx];
+        }
+    }
+
+    /// 選択時に加算するペナルティ。最頻の手で coef、未使用の手で 0。
+    ///
+    /// 上限を coef に抑えることで、真の改善手（デルタが大きく負）を打ち消さずに
+    /// 「デルタがほぼ0の手」同士の優先順位だけを入れ替えられる。
+    #[inline]
+    fn penalty(&self, c1: CharId, c2: CharId, coef: f64) -> f64 {
+        if coef == 0.0 || self.max_count == 0 {
+            return 0.0;
+        }
+        let (a, b) = normalize_pair(c1, c2);
+        let idx = pair_index(a as usize, b as usize);
+        coef * (self.counts[idx] as f64 / self.max_count as f64)
+    }
+}
+
 #[inline]
 fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
     if a <= b {
@@ -408,6 +461,14 @@ pub struct SearchConfig {
     pub tenure_grow_threshold: f64,
     pub tenure_grow_interval: usize,
     pub tenure_max_scale: f64,
+    /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
+    ///
+    /// 停滞時に「よく使ったスワップ」へ最大この値のペナルティを課し、探索を
+    /// 未探索方向へ押し出す。0 付近のデルタしか持たないプラトー上の手が大半なので、
+    /// この値はプラトーの手同士の順位を入れ替えるのに十分な大きさが要る。
+    /// 8シード×20000反復の掃引では none/hybrid とも 0.4〜1.5 が平坦な最良域で、
+    /// 3.0 では悪化した（真の改善手を打ち消し始める）。既定 0.8 はその中央。
+    pub diversification: f64,
     pub initial_layout_mode: InitialLayoutMode,
 }
 
@@ -428,6 +489,7 @@ impl Default for SearchConfig {
             tenure_grow_threshold: 0.5,
             tenure_grow_interval: 200,
             tenure_max_scale: 3.0,
+            diversification: 0.8,
             initial_layout_mode: InitialLayoutMode::default(),
         }
     }
@@ -447,6 +509,12 @@ impl SearchConfig {
         }
         if self.restart_after == 0 {
             let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
+        }
+        if self.diversification < 0.0 {
+            let _ = writeln!(
+                out,
+                "警告: diversification<0 → 多用した手を優遇してしまいます（0以上を推奨）"
+            );
         }
     }
 }
@@ -505,6 +573,8 @@ pub fn run(
     let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
+    // 長期記憶（多様化）。停滞時のみペナルティを効かせるので、探索を通じて数え続ける。
+    let mut move_freq = MoveFrequency::new();
 
     while iter < config.max_iter {
         iter += 1;
@@ -569,28 +639,39 @@ pub fn run(
         // O(n) で最良候補を選択（ソート不要）
         // best_free: タブーでない最良候補
         // best_aspiration: タブーだがベストスコアを更新する最良候補
-        let mut best_free: Option<Candidate> = None;
+        let mut best_free: Option<(Candidate, f64)> = None;
         let mut best_aspiration: Option<Candidate> = None;
         let aspiration_threshold = best_score - current_score;
+
+        // 停滞している間だけ多様化ペナルティを効かせる。閾値はテニュア拡大と共有し、
+        // 「停滞したらタブーを伸ばし、同時に未探索方向へ誘導する」を一貫させる。
+        let diversify = if config.diversification > 0.0 && no_improve > tenure_grow_start {
+            config.diversification
+        } else {
+            0.0
+        };
 
         for &cand in &candidates {
             let is_tabu = tabu.contains(cand.kind, cand.c1, cand.c2);
             if !is_tabu {
-                if best_free.is_none_or(|f| cand.delta < f.delta) {
-                    best_free = Some(cand);
+                // 比較にはペナルティ込みの値を使うが、スコア更新は生デルタで行う
+                let key = cand.delta + move_freq.penalty(cand.c1, cand.c2, diversify);
+                if best_free.is_none_or(|(_, k)| key < k) {
+                    best_free = Some((cand, key));
                 }
             } else if cand.delta < aspiration_threshold
                 && best_aspiration.is_none_or(|a| cand.delta < a.delta)
             {
+                // アスピレーションは「実際に最良を更新するか」の判定なので生デルタ
                 best_aspiration = Some(cand);
             }
         }
 
         let chosen = match (best_free, best_aspiration) {
-            (Some(f), Some(a)) => {
+            (Some((f, _)), Some(a)) => {
                 if a.delta < f.delta { a } else { f }
             }
-            (Some(f), None) => f,
+            (Some((f, _)), None) => f,
             (None, Some(a)) => a,
             (None, None) => continue,
         };
@@ -602,6 +683,7 @@ pub fn run(
         pair_cache.invalidate_dirty(dirty, n_active_chars);
 
         tabu.add(chosen.kind, chosen.c1, chosen.c2);
+        move_freq.record(chosen.c1, chosen.c2);
 
         if current_score < best_score {
             best_score = current_score;
@@ -1640,5 +1722,48 @@ mod tests {
             swap_would_violate(&layout, YA_ID, l1_char_at_p, &pairs),
             "ゃ moving onto a consonant's physical key must violate"
         );
+    }
+
+    #[test]
+    fn move_frequency_penalty_is_bounded_and_ordered() {
+        let mut mf = MoveFrequency::new();
+        // 未使用の手はペナルティ0（記録が空でも安全）
+        assert_eq!(mf.penalty(0, 1, 0.8), 0.0);
+
+        for _ in 0..4 {
+            mf.record(0, 1);
+        }
+        mf.record(2, 3);
+
+        // 最頻の手はちょうど coef、未使用の手は 0、中間はその間
+        assert!((mf.penalty(0, 1, 0.8) - 0.8).abs() < 1e-12);
+        assert_eq!(mf.penalty(4, 5, 0.8), 0.0);
+        let mid = mf.penalty(2, 3, 0.8);
+        assert!(mid > 0.0 && mid < 0.8, "mid={mid}");
+
+        // 係数0（無効化）は常にペナルティなし
+        assert_eq!(mf.penalty(0, 1, 0.0), 0.0);
+    }
+
+    #[test]
+    fn move_frequency_is_symmetric_in_pair_order() {
+        let mut mf = MoveFrequency::new();
+        mf.record(7, 3);
+        mf.record(3, 7);
+        // (a,b) と (b,a) は同じスワップなので同じカウンタを共有する
+        assert_eq!(mf.counts[pair_index(3, 7)], 2);
+        assert_eq!(mf.penalty(3, 7, 1.0), mf.penalty(7, 3, 1.0));
+    }
+
+    #[test]
+    fn move_frequency_covers_every_char_pair() {
+        // pair_index が NUM_PAIRS に収まること（拗音面の仮想文字IDを含む全域）
+        let mut mf = MoveFrequency::new();
+        for a in 0..MAX_CHARS {
+            for b in (a + 1)..MAX_CHARS {
+                mf.record(a as CharId, b as CharId);
+            }
+        }
+        assert_eq!(mf.max_count, 1);
     }
 }

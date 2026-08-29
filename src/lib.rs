@@ -78,6 +78,12 @@ pub fn write_config_summary(
         search_config.tenure_grow_interval,
         search_config.tenure_max_scale
     );
+    let _ = writeln!(
+        out,
+        " diversification= {:.2}{}",
+        search_config.diversification,
+        if search_config.diversification > 0.0 { "" } else { "（無効）" }
+    );
     let _ = writeln!(out, " initial_layout = {}",
         search_config.initial_layout_mode.config_label()
     );
