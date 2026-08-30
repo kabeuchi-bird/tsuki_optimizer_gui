@@ -61,6 +61,76 @@ impl TabuList {
     }
 }
 
+/// n 要素から2つ選ぶ組み合わせ数
+#[inline]
+fn pair_count(n: usize) -> usize {
+    n * n.saturating_sub(1) / 2
+}
+
+/// 拗音面内スワップのペア数（子音同士 + 子音×void）。
+///
+/// 少なくとも一方の端点を子音に限定するため、単純な組み合わせ数にはならない。
+#[inline]
+fn yoon_pair_count(k: usize, n: usize) -> usize {
+    if k == 0 || n < 2 {
+        return 0;
+    }
+    pair_count(k) + k * (n - k)
+}
+
+/// 各操作種別の近傍サイズ（1反復で生成しうる候補手の数）。
+///
+/// 候補生成器は「全ペア数がサンプリング上限以下なら全列挙、超えるなら上限まで
+/// サンプリング」という規則なので、近傍サイズは両者の小さい方になる。テニュアは
+/// この値への比で指定するため、生成側と同じ式をここで共有する。
+///
+/// L1/L2 の文字数は層間スワップが1対1交換なので探索中に変化せず、拗音面の文字数も
+/// キーボード設定から決まる。よって探索開始時に一度求めれば足りる。
+fn neighborhood_sizes(
+    layout: &Layout,
+    l1_free: usize,
+    l2_free: usize,
+    config: &SearchConfig,
+) -> [usize; NUM_OP_KINDS] {
+    let ab = config.ab_sample_limit;
+    let mut sizes = [0usize; NUM_OP_KINDS];
+    sizes[OpKind::SwapL1 as usize] = pair_count(l1_free).min(ab);
+    sizes[OpKind::SwapL2 as usize] = pair_count(l2_free).min(ab);
+    sizes[OpKind::InterLayer as usize] = config.inter_sample;
+    if layout.kp.yoon {
+        let k = layout.kp.num_consonants as usize;
+        let n = layout.kp.yoon_char_count();
+        sizes[OpKind::SwapYoon as usize] = yoon_pair_count(k, n).min(ab);
+    }
+    sizes
+}
+
+/// `OpKind` 添字の配列をログ用に整形する（"l1=15 l2=15 inter=25 [yoon=15]"）
+fn summarize_by_kind(values: &[usize; NUM_OP_KINDS], yoon: bool) -> String {
+    let mut s = format!(
+        "l1={} l2={} inter={}",
+        values[OpKind::SwapL1 as usize],
+        values[OpKind::SwapL2 as usize],
+        values[OpKind::InterLayer as usize]
+    );
+    if yoon {
+        s.push_str(&format!(" yoon={}", values[OpKind::SwapYoon as usize]));
+    }
+    s
+}
+
+/// 近傍サイズ比から実際のテニュア（禁止する手数）を求める。
+///
+/// 比が正なら最低1手は禁止する。小さな近傍（拗音面など）で丸めが0になり、
+/// 「比を指定したのにタブーが効かない」という無言の無効化を避けるため。
+#[inline]
+fn tenure_from_ratio(ratio: f64, neighborhood: usize) -> usize {
+    if ratio <= 0.0 || neighborhood == 0 {
+        return 0;
+    }
+    ((ratio * neighborhood as f64).round() as usize).max(1)
+}
+
 /// ——————————————————————————————
 /// 操作種別ごとのタブーリスト一式（テニュアの拡大・リセットを含む）
 ///
@@ -80,8 +150,17 @@ struct TabuSet {
 }
 
 impl TabuSet {
-    /// 設定と拡大パラメータからタブーリスト一式を構築する
-    fn new(base: [usize; NUM_OP_KINDS], grow_period: usize, config: &SearchConfig) -> Self {
+    /// 設定と拡大パラメータからタブーリスト一式を構築する。
+    ///
+    /// テニュアは近傍サイズ比で与えられるので、ここで実際の手数へ変換する。
+    /// 比が正なら最低1手は禁止する（丸めで0になって無効化するのを防ぐ）。
+    fn new(
+        ratios: [f64; NUM_OP_KINDS],
+        neighborhood: [usize; NUM_OP_KINDS],
+        grow_period: usize,
+        config: &SearchConfig,
+    ) -> Self {
+        let base = std::array::from_fn(|i| tenure_from_ratio(ratios[i], neighborhood[i]));
         let step = base.map(|b| {
             (b as f64 * (config.tenure_max_scale - 1.0) * config.tenure_grow_interval as f64
                 / grow_period as f64)
@@ -148,16 +227,7 @@ impl TabuSet {
 
     /// ログ表示用の現在テニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
     fn tenure_summary(&self, yoon: bool) -> String {
-        let mut s = format!(
-            "l1={} l2={} inter={}",
-            self.cur[OpKind::SwapL1 as usize],
-            self.cur[OpKind::SwapL2 as usize],
-            self.cur[OpKind::InterLayer as usize]
-        );
-        if yoon {
-            s.push_str(&format!(" yoon={}", self.cur[OpKind::SwapYoon as usize]));
-        }
-        s
+        summarize_by_kind(&self.cur, yoon)
     }
 }
 
@@ -449,11 +519,16 @@ pub struct SearchConfig {
     pub max_iter: usize,
     pub restart_after: usize,
     pub max_restarts: usize,
-    pub tabu_l1: usize,
-    pub tabu_l2: usize,
-    pub tabu_inter: usize,
-    /// 拗音面内スワップのタブーテニュア（hybrid のみ使用）
-    pub tabu_yoon: usize,
+    /// タブーテニュア（近傍サイズ比）。L1内 / L2内 / 層間 / 拗音面内で個別に指定する。
+    ///
+    /// 絶対手数ではなく比で持つのは、意味のある量が「近傍のうち何割を禁止するか」
+    /// だから。文字数・盤面サイズ・`ab_sample_limit` / `inter_sample` が変われば
+    /// 近傍サイズも変わるが、比で指定しておけば探索の締まり具合は保たれる。
+    pub tabu_ratio_l1: f64,
+    pub tabu_ratio_l2: f64,
+    pub tabu_ratio_inter: f64,
+    /// 拗音面内スワップのテニュア比（hybrid のみ使用）
+    pub tabu_ratio_yoon: f64,
     pub inter_sample: usize,
     pub ab_sample_limit: usize,
     pub log_interval: usize,
@@ -478,10 +553,10 @@ impl Default for SearchConfig {
             max_iter: 50_000,
             restart_after: 3_000,
             max_restarts: 10,
-            tabu_l1: 15,
-            tabu_l2: 15,
-            tabu_inter: 25,
-            tabu_yoon: 15,
+            tabu_ratio_l1: 0.075,
+            tabu_ratio_l2: 0.075,
+            tabu_ratio_inter: 0.30,
+            tabu_ratio_yoon: 0.075,
             inter_sample: 80,
             ab_sample_limit: 200,
             log_interval: 1_000,
@@ -496,6 +571,16 @@ impl Default for SearchConfig {
 }
 
 impl SearchConfig {
+    /// テニュア比を `OpKind` 添字の配列にまとめる
+    fn tabu_ratios(&self) -> [f64; NUM_OP_KINDS] {
+        let mut r = [0.0; NUM_OP_KINDS];
+        r[OpKind::SwapL1 as usize] = self.tabu_ratio_l1;
+        r[OpKind::SwapL2 as usize] = self.tabu_ratio_l2;
+        r[OpKind::InterLayer as usize] = self.tabu_ratio_inter;
+        r[OpKind::SwapYoon as usize] = self.tabu_ratio_yoon;
+        r
+    }
+
     /// 設定値を検証し、問題があれば警告メッセージを返す
     pub fn validate(&self, out: &mut impl Write) {
         if self.max_iter == 0 {
@@ -509,6 +594,19 @@ impl SearchConfig {
         }
         if self.restart_after == 0 {
             let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
+        }
+        for (name, ratio) in [
+            ("tabu_ratio_l1", self.tabu_ratio_l1),
+            ("tabu_ratio_l2", self.tabu_ratio_l2),
+            ("tabu_ratio_inter", self.tabu_ratio_inter),
+            ("tabu_ratio_yoon", self.tabu_ratio_yoon),
+        ] {
+            if ratio >= 1.0 {
+                let _ = writeln!(
+                    out,
+                    "警告: {name}={ratio} → 近傍の全手がタブーになり、アスピレーション以外は選べません（1.0未満を推奨）"
+                );
+            }
         }
         if self.diversification < 0.0 {
             let _ = writeln!(
@@ -548,22 +646,26 @@ pub fn run(
         .restart_after
         .saturating_sub(tenure_grow_start)
         .max(1);
-    let mut tabu = TabuSet::new(
-        [
-            config.tabu_l1,
-            config.tabu_l2,
-            config.tabu_inter,
-            config.tabu_yoon,
-        ],
-        grow_period,
-        config,
-    );
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
     let mut candidates: Vec<Candidate> =
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+
+    // 近傍サイズはテニュアの基準になるので、ループに入る前に一度だけ求める。
+    // 層間スワップは1対1交換で L1/L2 の文字数を変えないため、この値は探索中不変。
+    collect_l1_free_chars_into(&current, &mut l1_free);
+    collect_l2_chars_into(&current, &mut l2_free);
+    let neighborhood = neighborhood_sizes(&current, l1_free.len(), l2_free.len(), config);
+    let mut tabu = TabuSet::new(config.tabu_ratios(), neighborhood, grow_period, config);
+    // テニュアは比指定なので、実際に何手を禁止することになったかを一度だけ出す
+    let _ = writeln!(
+        out,
+        " 近傍サイズ     {}\n テニュア(実手数) {}",
+        summarize_by_kind(&neighborhood, current.kp.yoon),
+        tabu.tenure_summary(current.kp.yoon)
+    );
     // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
     let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
     // 実際に使われる CharId の上限（キャッシュ無効化の走査範囲）
@@ -843,7 +945,7 @@ fn generate_yoon_candidates(
         return;
     }
     // 子音を含むペア数 = 子音同士 + 子音×void
-    let max_pairs = k * (k - 1) / 2 + k * (n - k);
+    let max_pairs = yoon_pair_count(k, n);
 
     // 除外（無操作ペア・制約違反）のときは false を返す。呼び出し側はこれを見て
     // sample_limit の消費対象から外す（除外分もカウントすると、無操作ペアが多い
@@ -933,7 +1035,7 @@ fn generate_swap_candidates(
         return;
     }
 
-    let max_pairs = n * (n - 1) / 2;
+    let max_pairs = pair_count(n);
     if max_pairs <= sample_limit {
         for i in 0..n {
             for j in i + 1..n {
@@ -1765,5 +1867,39 @@ mod tests {
             }
         }
         assert_eq!(mf.max_count, 1);
+    }
+
+    #[test]
+    fn tenure_from_ratio_rounds_and_keeps_a_positive_ratio_effective() {
+        // 近傍200手の 7.5% は15手
+        assert_eq!(tenure_from_ratio(0.075, 200), 15);
+        // 比0（無効）と近傍0（その操作が存在しない）は0手
+        assert_eq!(tenure_from_ratio(0.0, 200), 0);
+        assert_eq!(tenure_from_ratio(0.5, 0), 0);
+        // 比が正なら丸めで0にはせず、最低1手は禁止する
+        assert_eq!(tenure_from_ratio(0.01, 10), 1);
+    }
+
+    #[test]
+    fn neighborhood_size_matches_what_the_generator_would_produce() {
+        // 全ペア数が上限以下なら全ペア、超えるなら上限。生成器と同じ規則であること。
+        assert_eq!(pair_count(20).min(200), 190);
+        assert_eq!(pair_count(30).min(200), 200);
+        // 拗音面は「少なくとも一方が子音」なので単純な組み合わせ数にはならない
+        assert_eq!(yoon_pair_count(3, 5), 3 + 3 * 2);
+        assert_eq!(yoon_pair_count(0, 5), 0);
+        assert_eq!(yoon_pair_count(3, 1), 0);
+    }
+
+    #[test]
+    fn tenure_scales_with_the_sampling_limit() {
+        // 比で指定する狙いは「上限を変えても禁止する割合が保たれる」こと
+        let mut cfg = SearchConfig::default();
+        let ratio = cfg.tabu_ratio_l2;
+        cfg.ab_sample_limit = 200;
+        let small = tenure_from_ratio(ratio, pair_count(40).min(cfg.ab_sample_limit));
+        cfg.ab_sample_limit = 400;
+        let large = tenure_from_ratio(ratio, pair_count(40).min(cfg.ab_sample_limit));
+        assert_eq!(small * 2, large, "上限を倍にしたらテニュアも倍になるべき");
     }
 }

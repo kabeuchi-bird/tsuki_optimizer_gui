@@ -56,14 +56,17 @@ pub fn write_config_summary(
     let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
     let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
     let yoon_tabu = if kp.yoon {
-        format!(" yoon={}", search_config.tabu_yoon)
+        format!(" yoon={:.3}", search_config.tabu_ratio_yoon)
     } else {
         String::new()
     };
     let _ = writeln!(
         out,
-        " tabu           l1={} l2={} inter={}{}",
-        search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter, yoon_tabu
+        " tabu(近傍比)   l1={:.3} l2={:.3} inter={:.3}{}",
+        search_config.tabu_ratio_l1,
+        search_config.tabu_ratio_l2,
+        search_config.tabu_ratio_inter,
+        yoon_tabu
     );
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
     let _ = writeln!(

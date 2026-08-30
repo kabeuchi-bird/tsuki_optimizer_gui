@@ -39,6 +39,13 @@ pub struct RunConfig {
     pub max_iter: Option<usize>,
     pub restart_after: Option<usize>,
     pub max_restarts: Option<usize>,
+    /// タブーテニュア（近傍サイズ比）。省略時は `SearchConfig` の既定値。
+    pub tabu_ratio_l1: Option<f64>,
+    pub tabu_ratio_l2: Option<f64>,
+    pub tabu_ratio_inter: Option<f64>,
+    pub tabu_ratio_yoon: Option<f64>,
+
+    // ── 廃止済み（絶対手数指定）。設定ファイルの互換のために受け取り、警告する ──
     pub tabu_l1: Option<usize>,
     pub tabu_l2: Option<usize>,
     pub tabu_inter: Option<usize>,
@@ -124,14 +131,28 @@ impl Config {
     pub fn build_search_config(&self) -> SearchConfig {
         let r = &self.run;
         let d = SearchConfig::default();
+        for (old, new) in [
+            ("tabu_l1", "tabu_ratio_l1"),
+            ("tabu_l2", "tabu_ratio_l2"),
+            ("tabu_inter", "tabu_ratio_inter"),
+            ("tabu_yoon", "tabu_ratio_yoon"),
+        ]
+        .iter()
+        .zip([r.tabu_l1, r.tabu_l2, r.tabu_inter, r.tabu_yoon])
+        .filter_map(|(names, v)| v.map(|_| *names))
+        {
+            eprintln!(
+                "警告: {old} は廃止されました（絶対手数指定）→ 無視します。近傍サイズ比で指定する {new} を使ってください"
+            );
+        }
         SearchConfig {
             max_iter: r.max_iter.unwrap_or(d.max_iter),
             restart_after: r.restart_after.unwrap_or(d.restart_after),
             max_restarts: r.max_restarts.unwrap_or(d.max_restarts),
-            tabu_l1: r.tabu_l1.unwrap_or(d.tabu_l1),
-            tabu_l2: r.tabu_l2.unwrap_or(d.tabu_l2),
-            tabu_inter: r.tabu_inter.unwrap_or(d.tabu_inter),
-            tabu_yoon: r.tabu_yoon.unwrap_or(d.tabu_yoon),
+            tabu_ratio_l1: r.tabu_ratio_l1.unwrap_or(d.tabu_ratio_l1),
+            tabu_ratio_l2: r.tabu_ratio_l2.unwrap_or(d.tabu_ratio_l2),
+            tabu_ratio_inter: r.tabu_ratio_inter.unwrap_or(d.tabu_ratio_inter),
+            tabu_ratio_yoon: r.tabu_ratio_yoon.unwrap_or(d.tabu_ratio_yoon),
             inter_sample: r.inter_sample.unwrap_or(d.inter_sample),
             ab_sample_limit: r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
             log_interval: r.log_interval.unwrap_or(d.log_interval),
@@ -386,7 +407,7 @@ mod tests {
         let sc = config.build_search_config();
         assert!(sc.max_iter > 0);
         assert!(sc.restart_after > 0);
-        assert!(sc.tabu_l1 > 0);
+        assert!(sc.tabu_ratio_l1 > 0.0);
     }
 
     #[test]
