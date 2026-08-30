@@ -318,6 +318,7 @@ impl App {
             tsuki_optimize::write_corpus_stats(&mut log_writer, &corpus.stats);
 
             // 設定検証
+            toml_config.validate(&mut log_writer);
             search_config.validate(&mut log_writer);
 
             // 設定サマリー出力

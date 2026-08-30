@@ -34,10 +34,11 @@ impl TabuList {
         }
     }
 
+    /// 候補ループから1候補につき1回呼ばれるので、インデックスは呼び出し側で
+    /// 一度だけ計算したものを受け取る（タブー判定と頻度参照で使い回すため）。
     #[inline]
-    fn contains(&self, c1: CharId, c2: CharId) -> bool {
-        let (a, b) = normalize_pair(c1, c2);
-        bitset_test(&self.bitset, pair_index(a as usize, b as usize))
+    fn contains_idx(&self, idx: usize) -> bool {
+        bitset_test(&self.bitset, idx)
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
@@ -61,6 +62,69 @@ impl TabuList {
     }
 }
 
+/// n 要素から2つ選ぶ組み合わせ数
+#[inline]
+const fn pair_count(n: usize) -> usize {
+    n * n.saturating_sub(1) / 2
+}
+
+/// 拗音面内スワップのペア数（子音同士 + 子音×void）。
+///
+/// 少なくとも一方の端点を子音に限定するため、単純な組み合わせ数にはならない。
+#[inline]
+fn yoon_pair_count(k: usize, n: usize) -> usize {
+    if k == 0 || n < 2 {
+        return 0;
+    }
+    pair_count(k) + k * (n - k)
+}
+
+/// 各操作種別の近傍サイズ（その反復で実際に生成された候補手の数）。
+///
+/// 生成規則（全ペア数とサンプリング上限の小さい方）を式で写し取ると、生成器が
+/// 実際には落としているペア——無操作ペア（`skip_inert_pair`）と制約違反
+/// （`swap_would_violate`）、サンプリングの試行打ち切り——が反映されず、
+/// 上振れした値になる。テニュアの意味は「選べる手のうち何割を禁止するか」なので、
+/// 分母は生成器が本当に並べた手数でなければならない。よって数える。
+fn count_by_kind(candidates: &[Candidate]) -> [usize; NUM_OP_KINDS] {
+    let mut sizes = [0usize; NUM_OP_KINDS];
+    for c in candidates {
+        sizes[c.kind as usize] += 1;
+    }
+    sizes
+}
+
+/// `OpKind` 添字の配列をログ用に整形する（"l1=15 l2=15 inter=25 [yoon=15]"）。
+///
+/// 表示する種別は `active` で決めるので、この関数自体は操作種別を知らない。
+pub(crate) fn summarize_by_kind<T: std::fmt::Display>(
+    values: &[T; NUM_OP_KINDS],
+    active: [bool; NUM_OP_KINDS],
+) -> String {
+    OpKind::ALL
+        .iter()
+        .filter(|k| active[**k as usize])
+        .map(|k| format!("{}={}", k.key(), values[*k as usize]))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 近傍サイズ比から実際のテニュア（禁止する手数）を求める。
+///
+/// 比が正なら最低1手は禁止する。小さな近傍（拗音面など）で丸めが0になり、
+/// 「比を指定したのにタブーが効かない」という無言の無効化を避けるため。
+#[inline]
+fn tenure_from_ratio(ratio: f64, neighborhood: usize) -> usize {
+    // NaN や無限大は比として意味を持たない。`as usize` は NaN を 0、無限大を
+    // usize::MAX に飽和させるので、ここで弾かないと後段の確保サイズが破綻する。
+    if !ratio.is_finite() || ratio <= 0.0 || neighborhood == 0 {
+        return 0;
+    }
+    // タブーリストはペア単位で重複排除されるため、格納しうる要素数は全ペア数が上限。
+    // それを超える容量は必ず無駄で、極端な比（例 1e20）では確保時にパニックする。
+    ((ratio * neighborhood as f64).round() as usize).clamp(1, NUM_PAIRS)
+}
+
 /// ——————————————————————————————
 /// 操作種別ごとのタブーリスト一式（テニュアの拡大・リセットを含む）
 ///
@@ -80,15 +144,23 @@ struct TabuSet {
 }
 
 impl TabuSet {
-    /// 設定と拡大パラメータからタブーリスト一式を構築する
-    fn new(base: [usize; NUM_OP_KINDS], grow_period: usize, config: &SearchConfig) -> Self {
+    /// 設定と拡大パラメータからタブーリスト一式を構築する。
+    /// テニュアは近傍サイズ比で与えられるので、ここで実際の手数へ変換する。
+    fn new(
+        ratios: [f64; NUM_OP_KINDS],
+        neighborhood: [usize; NUM_OP_KINDS],
+        grow_period: usize,
+        config: &SearchConfig,
+    ) -> Self {
+        let base = std::array::from_fn(|i| tenure_from_ratio(ratios[i], neighborhood[i]));
         let step = base.map(|b| {
             (b as f64 * (config.tenure_max_scale - 1.0) * config.tenure_grow_interval as f64
                 / grow_period as f64)
                 .ceil()
                 .max(1.0) as usize
         });
-        let max = base.map(|b| (b as f64 * config.tenure_max_scale) as usize);
+        // 拡大後の上限も同じ理由で全ペア数に頭打ちする
+        let max = base.map(|b| ((b as f64 * config.tenure_max_scale) as usize).min(NUM_PAIRS));
         TabuSet {
             lists: std::array::from_fn(|i| TabuList::new(base[i])),
             base,
@@ -99,8 +171,8 @@ impl TabuSet {
     }
 
     #[inline]
-    fn contains(&self, kind: OpKind, c1: CharId, c2: CharId) -> bool {
-        self.lists[kind as usize].contains(c1, c2)
+    fn contains_idx(&self, kind: OpKind, idx: usize) -> bool {
+        self.lists[kind as usize].contains_idx(idx)
     }
 
     #[inline]
@@ -147,17 +219,76 @@ impl TabuSet {
     }
 
     /// ログ表示用の現在テニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
-    fn tenure_summary(&self, yoon: bool) -> String {
-        let mut s = format!(
-            "l1={} l2={} inter={}",
-            self.cur[OpKind::SwapL1 as usize],
-            self.cur[OpKind::SwapL2 as usize],
-            self.cur[OpKind::InterLayer as usize]
-        );
-        if yoon {
-            s.push_str(&format!(" yoon={}", self.cur[OpKind::SwapYoon as usize]));
+    fn tenure_summary(&self, active: [bool; NUM_OP_KINDS]) -> String {
+        summarize_by_kind(&self.cur, active)
+    }
+}
+
+/// ——————————————————————————————
+/// 頻度ベース長期記憶（多様化）
+///
+/// タブーリストは「直近 N 手」という短期記憶しか持たない。この実装には探索全体を
+/// 通じた長期記憶が無く、停滞時に「まだ試していない方向」へ誘導する仕組みが無かった。
+///
+/// 実測では 5万反復のうち実改善は約600回で、残りはスコアが変化しないスワップに
+/// 費やされていた。タブーサーチが盆地を脱出する仕組みは「一番マシな悪化手を選んで
+/// 山を登る」ことだが、デルタ0の手が常に供給されるため一度も山を登れていなかった。
+///
+/// ここでは各スワップペアの適用回数を数え、停滞時に「よく使った手」へペナルティを
+/// 課すことで、山登りの方向を未探索側へ向ける。
+///
+/// `TabuSet` と違い `OpKind` では分けず、文字ペアだけを鍵にしている。ある瞬間に
+/// あるペアを動かせる操作は1つに定まる（両方L1ならL1内、両方L2ならL2内、層をまたぐ
+/// なら層間、拗音面は CharId 空間が独立）ので区別する必要がなく、むしろ「この2文字を
+/// 何度入れ替えたか」という操作非依存の量のほうが長期記憶として素直だからでもある。
+/// ——————————————————————————————
+struct MoveFrequency {
+    /// pair_index -> そのペアが適用された回数
+    counts: Vec<u32>,
+    /// 正規化用。最頻の手のペナルティがちょうど係数と一致するようにする。
+    max_count: u32,
+}
+
+impl MoveFrequency {
+    fn new() -> Self {
+        MoveFrequency {
+            counts: vec![0; NUM_PAIRS],
+            max_count: 0,
         }
-        s
+    }
+
+    #[inline]
+    fn record(&mut self, c1: CharId, c2: CharId) {
+        let idx = pair_key(c1, c2);
+        self.counts[idx] += 1;
+        self.max_count = self.max_count.max(self.counts[idx]);
+    }
+
+    /// 停滞時に効かせる係数。記録が空のうちは 0 を返してペナルティを無効化する
+    /// （そのぶん `penalty` 側は 0除算を気にしなくてよい）。
+    #[inline]
+    fn penalty_coef(&self, diversification: f64) -> f64 {
+        if self.max_count == 0 {
+            0.0
+        } else {
+            diversification
+        }
+    }
+
+    /// 選択時に加算するペナルティ。最頻の手で coef、未使用の手で 0。
+    ///
+    /// 上限を coef に抑えることで、真の改善手（デルタが大きく負）を打ち消さずに
+    /// 「デルタがほぼ0の手」同士の優先順位だけを入れ替えられる。
+    ///
+    /// インデックスは呼び出し側がタブー判定と共用したものを渡す。正規化の除算を
+    /// 反復ごとに畳むと約2%速くなるが、丸め順序が変わって既存のシード結果が
+    /// 動くため、再現性を優先してこの順序のまま残している。
+    #[inline]
+    fn penalty(&self, idx: usize, coef: f64) -> f64 {
+        if coef == 0.0 {
+            return 0.0;
+        }
+        coef * (self.counts[idx] as f64 / self.max_count as f64)
     }
 }
 
@@ -171,7 +302,7 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
 }
 
 /// ペアの三角行列インデックス（TabuList / DeltaPairCache 共用）
-const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
+const NUM_PAIRS: usize = pair_count(MAX_CHARS);
 const BITS_PER_WORD: usize = u64::BITS as usize;
 const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
@@ -182,6 +313,16 @@ const _: () = assert!(MAX_CHARS <= 128, "MAX_CHARS must be <= 128 for u128 dirty
 fn pair_index(a: usize, b: usize) -> usize {
     debug_assert!(a < b && b < MAX_CHARS);
     a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+}
+
+/// 順不同の文字ペアを三角行列インデックスへ。
+///
+/// タブー判定・頻度記録・デルタキャッシュはどれも「順不同のペア」を鍵にするので、
+/// 正規化とインデックス化はここ1か所にまとめる。
+#[inline]
+fn pair_key(c1: CharId, c2: CharId) -> usize {
+    let (a, b) = normalize_pair(c1, c2);
+    pair_index(a as usize, b as usize)
 }
 
 #[inline]
@@ -339,6 +480,36 @@ pub enum OpKind {
 /// `OpKind` の種類数（`TabuSet` の配列長）
 const NUM_OP_KINDS: usize = 4;
 
+impl OpKind {
+    /// 全種類。操作を増やしたらここに足せば、種別ごとの走査は自動で追随する。
+    const ALL: [OpKind; NUM_OP_KINDS] = [
+        OpKind::SwapL1,
+        OpKind::SwapL2,
+        OpKind::InterLayer,
+        OpKind::SwapYoon,
+    ];
+
+    /// 設定キー・ログ表示に使う短い名前
+    fn key(self) -> &'static str {
+        match self {
+            OpKind::SwapL1 => "l1",
+            OpKind::SwapL2 => "l2",
+            OpKind::InterLayer => "inter",
+            OpKind::SwapYoon => "yoon",
+        }
+    }
+}
+
+/// その盤面設定で実際に使う操作種別。
+///
+/// 「どの操作が有効か」の判断をここ1か所に閉じ込め、ログ整形や設定表示が
+/// `if kp.yoon` を各所に持たなくて済むようにする。
+pub(crate) fn active_op_kinds(kp: &KeyboardParams) -> [bool; NUM_OP_KINDS] {
+    let mut active = [true; NUM_OP_KINDS];
+    active[OpKind::SwapYoon as usize] = kp.yoon;
+    active
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     kind: OpKind,
@@ -396,11 +567,13 @@ pub struct SearchConfig {
     pub max_iter: usize,
     pub restart_after: usize,
     pub max_restarts: usize,
-    pub tabu_l1: usize,
-    pub tabu_l2: usize,
-    pub tabu_inter: usize,
-    /// 拗音面内スワップのタブーテニュア（hybrid のみ使用）
-    pub tabu_yoon: usize,
+    /// タブーテニュア（近傍サイズ比）。`OpKind` 添字。
+    ///
+    /// 絶対手数ではなく比で持つのは、意味のある量が「近傍のうち何割を禁止するか」
+    /// だから。文字数・盤面サイズ・`ab_sample_limit` / `inter_sample` が変われば
+    /// 近傍サイズも変わるが、比で指定しておけば探索の締まり具合は保たれる。
+    /// 既定値の根拠（掃引結果）は config.toml を参照。
+    pub tabu_ratio: [f64; NUM_OP_KINDS],
     pub inter_sample: usize,
     pub ab_sample_limit: usize,
     pub log_interval: usize,
@@ -408,6 +581,13 @@ pub struct SearchConfig {
     pub tenure_grow_threshold: f64,
     pub tenure_grow_interval: usize,
     pub tenure_max_scale: f64,
+    /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
+    ///
+    /// 停滞時に「よく使ったスワップ」へ最大この値のペナルティを課し、探索を
+    /// 未探索方向へ押し出す。0 付近のデルタしか持たないプラトー上の手が大半なので、
+    /// この値はプラトーの手同士の順位を入れ替えるのに十分な大きさが要る。
+    /// 既定値の根拠（掃引結果）は config.toml を参照。
+    pub diversification: f64,
     pub initial_layout_mode: InitialLayoutMode,
 }
 
@@ -417,10 +597,7 @@ impl Default for SearchConfig {
             max_iter: 50_000,
             restart_after: 3_000,
             max_restarts: 10,
-            tabu_l1: 15,
-            tabu_l2: 15,
-            tabu_inter: 25,
-            tabu_yoon: 15,
+            tabu_ratio: [0.075, 0.075, 0.30, 0.075],
             inter_sample: 80,
             ab_sample_limit: 200,
             log_interval: 1_000,
@@ -428,6 +605,7 @@ impl Default for SearchConfig {
             tenure_grow_threshold: 0.5,
             tenure_grow_interval: 200,
             tenure_max_scale: 3.0,
+            diversification: 0.8,
             initial_layout_mode: InitialLayoutMode::default(),
         }
     }
@@ -447,6 +625,28 @@ impl SearchConfig {
         }
         if self.restart_after == 0 {
             let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
+        }
+        for kind in OpKind::ALL {
+            let ratio = self.tabu_ratio[kind as usize];
+            if !ratio.is_finite() {
+                let _ = writeln!(
+                    out,
+                    "警告: tabu_ratio.{}={ratio} は比として無効です → その操作のタブーを無効化します",
+                    kind.key()
+                );
+            } else if ratio >= 1.0 {
+                let _ = writeln!(
+                    out,
+                    "警告: tabu_ratio.{}={ratio} → 近傍の全手がタブーになり、アスピレーション以外は選べません（1.0未満を推奨）",
+                    kind.key()
+                );
+            }
+        }
+        if self.diversification < 0.0 {
+            let _ = writeln!(
+                out,
+                "警告: diversification<0 → 多用した手を優遇してしまいます（0以上を推奨）"
+            );
         }
     }
 }
@@ -480,22 +680,18 @@ pub fn run(
         .restart_after
         .saturating_sub(tenure_grow_start)
         .max(1);
-    let mut tabu = TabuSet::new(
-        [
-            config.tabu_l1,
-            config.tabu_l2,
-            config.tabu_inter,
-            config.tabu_yoon,
-        ],
-        grow_period,
-        config,
-    );
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
     let mut candidates: Vec<Candidate> =
         Vec::with_capacity(config.ab_sample_limit * 2 + config.inter_sample);
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
+
+    let active = active_op_kinds(&current.kp);
+    // テニュアは近傍サイズ比なので、最初の反復で候補を数えるまで確定できない。
+    // それまでは容量0で置いておく——1反復目のタブーリストはどのみち空なので、
+    // 判定結果は本来のテニュアで作った場合と変わらない。
+    let mut tabu = TabuSet::new(config.tabu_ratio, [0; NUM_OP_KINDS], grow_period, config);
     // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
     let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
     // 実際に使われる CharId の上限（キャッシュ無効化の走査範囲）
@@ -505,6 +701,8 @@ pub fn run(
     let mut inter_bufs = InterLayerBufs::new(current.kp.num_chars);
     let mut delta_buf = DeltaScoreBuffer::new(ctx.corpus.bigrams.len(), ctx.corpus.trigrams.len());
     let mut pair_cache = DeltaPairCache::new();
+    // 長期記憶（多様化）。停滞時のみペナルティを効かせるので、探索を通じて数え続ける。
+    let mut move_freq = MoveFrequency::new();
 
     while iter < config.max_iter {
         iter += 1;
@@ -566,22 +764,51 @@ pub fn run(
             break;
         }
 
+        // 実際に並んだ候補数からテニュアを確定する（1反復目のみ）。
+        // この時点でタブーリストは空なので、ここで作り直しても情報は失われない。
+        if iter == 1 {
+            let neighborhood = count_by_kind(&candidates);
+            tabu = TabuSet::new(config.tabu_ratio, neighborhood, grow_period, config);
+            let _ = writeln!(
+                out,
+                " 近傍サイズ(実測) {}\n テニュア(実手数) {}",
+                summarize_by_kind(&neighborhood, active),
+                tabu.tenure_summary(active)
+            );
+        }
+
         // O(n) で最良候補を選択（ソート不要）
         // best_free: タブーでない最良候補
         // best_aspiration: タブーだがベストスコアを更新する最良候補
         let mut best_free: Option<Candidate> = None;
+        // best_free の比較に使うペナルティ込みの値。ループ内でしか使わないので
+        // Option には持たせない（選ばれた手のスコア更新は常に生デルタ）。
+        let mut best_free_key = f64::INFINITY;
         let mut best_aspiration: Option<Candidate> = None;
         let aspiration_threshold = best_score - current_score;
 
+        // 停滞している間だけ多様化ペナルティを効かせる。閾値はテニュア拡大と共有し、
+        // 「停滞したらタブーを伸ばし、同時に未探索方向へ誘導する」を一貫させる。
+        let diversify = if config.diversification > 0.0 && no_improve > tenure_grow_start {
+            move_freq.penalty_coef(config.diversification)
+        } else {
+            0.0
+        };
+
         for &cand in &candidates {
-            let is_tabu = tabu.contains(cand.kind, cand.c1, cand.c2);
-            if !is_tabu {
-                if best_free.is_none_or(|f| cand.delta < f.delta) {
+            // タブー判定と頻度参照は同じペアキーを見るので、1候補につき一度だけ引く
+            let idx = pair_key(cand.c1, cand.c2);
+            if !tabu.contains_idx(cand.kind, idx) {
+                // 比較にはペナルティ込みの値を使うが、スコア更新は生デルタで行う
+                let key = cand.delta + move_freq.penalty(idx, diversify);
+                if key < best_free_key {
+                    best_free_key = key;
                     best_free = Some(cand);
                 }
             } else if cand.delta < aspiration_threshold
                 && best_aspiration.is_none_or(|a| cand.delta < a.delta)
             {
+                // アスピレーションは「実際に最良を更新するか」の判定なので生デルタ
                 best_aspiration = Some(cand);
             }
         }
@@ -602,6 +829,7 @@ pub fn run(
         pair_cache.invalidate_dirty(dirty, n_active_chars);
 
         tabu.add(chosen.kind, chosen.c1, chosen.c2);
+        move_freq.record(chosen.c1, chosen.c2);
 
         if current_score < best_score {
             best_score = current_score;
@@ -631,7 +859,7 @@ pub fn run(
             let _ = writeln!(out,
                 "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure {}{}",
                 iter, current_score, best_score, no_improve,
-                tabu.tenure_summary(current.kp.yoon),
+                tabu.tenure_summary(active),
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
             on_update(&SearchUpdate {
@@ -761,7 +989,7 @@ fn generate_yoon_candidates(
         return;
     }
     // 子音を含むペア数 = 子音同士 + 子音×void
-    let max_pairs = k * (k - 1) / 2 + k * (n - k);
+    let max_pairs = yoon_pair_count(k, n);
 
     // 除外（無操作ペア・制約違反）のときは false を返す。呼び出し側はこれを見て
     // sample_limit の消費対象から外す（除外分もカウントすると、無操作ペアが多い
@@ -851,7 +1079,7 @@ fn generate_swap_candidates(
         return;
     }
 
-    let max_pairs = n * (n - 1) / 2;
+    let max_pairs = pair_count(n);
     if max_pairs <= sample_limit {
         for i in 0..n {
             for j in i + 1..n {
@@ -1081,6 +1309,70 @@ pub fn build_initial_layout(
     layout
 }
 
+/// `l1_only` 指定の文字を Layer 1 へ引き上げる。
+///
+/// `l1_only` は「L1 から出さない」制約としてのみ実装されており（`is_inter_layer_movable`
+/// が false を返す）、初期配置で L2 にいる文字を L1 へ入れる処理はどこにもなかった。
+/// そのため初期レイヤーが L2 の文字（CharId 30..60）を `l1_only` に指定すると、
+/// 昇格候補にも層間スワップ候補にもならず、L2 に固定されたまま制約が黙って破られていた。
+///
+/// ここで L1 の最低頻度の可動文字と交換して引き上げ、以降の
+/// `is_inter_layer_movable` による凍結が「L1 に居続ける」意味になるようにする。
+///
+/// 交換相手が尽きた場合（L1 が固定文字で埋まっている等）は、引き上げられなかった
+/// 文字を返す。呼び出し側で警告を出すために使う。
+fn promote_l1_only_chars(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+) -> Vec<CharId> {
+    let unigrams = &ctx.corpus.unigrams;
+    // 頻度の低い文字から引き上げると、交換相手（L1 の最低頻度文字）を先に消費して
+    // しまうため、頻度の高い文字から順に処理する
+    let mut pending: Vec<CharId> = (0..kp.num_chars as CharId)
+        .filter(|&c| ctx.l1_only.contains(&c) && !is_void(c) && !layout.is_l1(c))
+        .collect();
+    // hybrid では ゃゅょ が L1 にいることが方式の前提になっている（setup_yoon_face は
+    // L1 の物理位置を見て子音の禁止位置を決めるので、L2 に残ると子音と同じキーに
+    // 同居しうる）。l1_only が多くて L1 の交換相手を使い切る設定でも取りこぼさないよう、
+    // ユーザー指定の l1_only 文字より先に処理する。
+    pending.sort_unstable_by(|&a, &b| {
+        let yoon_shift = |c: CharId| kp.yoon && crate::chars::is_yoon_shift_id(c);
+        yoon_shift(b)
+            .cmp(&yoon_shift(a))
+            .then_with(|| unigrams[b as usize].total_cmp(&unigrams[a as usize]))
+    });
+
+    let mut failed = Vec::new();
+    for c in pending {
+        // 交換相手: L1 にいる可動文字のうち最低頻度のもの
+        let target = (0..kp.num_chars as CharId)
+            .filter(|&t| {
+                layout.is_l1(t) && is_inter_layer_movable(t, kp, ctx.l1_only) && !is_void(t)
+            })
+            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
+        match target {
+            Some(t) => layout.swap_chars(c, t),
+            None => failed.push(c),
+        }
+    }
+    failed
+}
+
+/// `promote_l1_only_chars` が引き上げられなかった文字を警告する。
+fn warn_unpromoted(failed: Vec<CharId>, out: &mut impl Write) {
+    if failed.is_empty() {
+        return;
+    }
+    use crate::chars::CHAR_LIST;
+    let names: String = failed.iter().map(|&c| CHAR_LIST[c as usize]).collect();
+    let _ = writeln!(
+        out,
+        "警告: l1_only の文字 '{}' を Layer 1 へ引き上げられませんでした（L1に交換可能な文字がありません）。",
+        names
+    );
+}
+
 /// hybrid: 拗音面（第3層）を構築する。
 ///
 /// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
@@ -1092,21 +1384,9 @@ fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams)
     let npl = kp.num_slots_per_layer as usize;
     let unigrams = &ctx.corpus.unigrams;
 
-    // 1. ゃゅょ を L1 へ移動
-    for &yc in &[crate::chars::YO_ID, crate::chars::YU_ID, crate::chars::YA_ID] {
-        if layout.is_l1(yc) {
-            continue;
-        }
-        // 最低頻度の可動 L1 基底文字を L2 へ退避
-        let target = (0..kp.num_chars as CharId)
-            .filter(|&c| {
-                layout.is_l1(c) && is_inter_layer_movable(c, kp, ctx.l1_only) && !is_void(c)
-            })
-            .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
-        if let Some(t) = target {
-            layout.swap_chars(yc, t);
-        }
-    }
+    // 1. ゃゅょ の L1 への引き上げは promote_l1_only_chars が担う
+    //    （hybrid では YoonSetup::extend_l1_only が ゃゅょ を l1_only に入れている）。
+    //    ここに来た時点で L1 にいることを前提に、以降で禁止スロットを判定する。
 
     // 2. 子音を配置できる拗音面 physical（禁止位置を除く）
     let mut avail: Vec<usize> = (0..npl)
@@ -1172,6 +1452,9 @@ fn build_initial_2_263(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    // l1_only の文字を先に L1 へ引き上げる。拗音面の禁止スロット判定は
+    // ゃゅょ が L1 にいることを前提にするため、setup_yoon_face より前に行う。
+    warn_unpromoted(promote_l1_only_chars(&mut layout, ctx, kp), out);
     if kp.yoon {
         setup_yoon_face(&mut layout, ctx, kp);
     }
@@ -1183,8 +1466,12 @@ fn build_initial_2_263(
             0
         };
 
+    // 引き上げ後の実際の配置を数える。引き上げに失敗した文字を「L1を占める」と
+    // 数えると L1 の空き枠を過少に見積もり、昇格すべき高頻度文字を弾いてしまう。
     let l1_fixed_count = (0..kp.num_chars as CharId)
-        .filter(|&c| !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)))
+        .filter(|&c| {
+            !is_void(c) && (is_fixed(c, kp) || ctx.l1_only.contains(&c)) && layout.is_l1(c)
+        })
         .count();
     if l1_fixed_count > l1_char_slots {
         let _ = writeln!(
@@ -1306,6 +1593,7 @@ fn build_initial_random(
     out: &mut impl Write,
 ) -> Layout {
     let mut layout = Layout::initial(kp);
+    warn_unpromoted(promote_l1_only_chars(&mut layout, ctx, kp), out);
     if kp.yoon {
         setup_yoon_face(&mut layout, ctx, kp);
     }
@@ -1525,6 +1813,47 @@ mod tests {
     }
 
     #[test]
+    fn test_l1_only_chars_are_promoted_to_l1() {
+        // l1_only は「L1 から出さない」制約でしかなく、初期配置が L2 の文字を
+        // L1 へ入れる処理が無かったため、指定しても黙って L2 に残っていた。
+        use crate::chars::build_char_to_id;
+        let map = build_char_to_id();
+        let corpus = Corpus::from_str(YOON_CORPUS);
+        let kp = KeyboardParams::k3x10();
+        let weights = Weights { kp, ..Default::default() };
+
+        // 'ー'(CharId 58) と 'を'(41) は初期配置が L2
+        let l2_start = [map[&'ー'], map[&'を']];
+        let plain = Layout::initial(kp);
+        for &c in &l2_start {
+            assert!(!plain.is_l1(c), "前提: CharId {c} は初期 L2");
+        }
+
+        let mut l1_only: HashSet<CharId> = HashSet::new();
+        l1_only.insert(crate::chars::DAKUTEN_ID);
+        l1_only.extend(l2_start);
+        let pairs: Vec<ExclusivePair> = Vec::new();
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+
+        for mode in [InitialLayoutMode::Tsuki2_263, InitialLayoutMode::Random] {
+            let mut rng = SmallRng::seed_from_u64(1);
+            let mut sink = Vec::new();
+            let layout = build_initial_layout(&ctx, kp, mode, &mut rng, &mut sink);
+            for &c in &l1_only {
+                assert!(
+                    layout.is_l1(c),
+                    "{mode:?}: l1_only の CharId {c} が L1 にいない"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_hybrid_swap_constraint() {
         // 子音がある拗音物理位置へ ゃ を L1 スワップできない
         let kp = KeyboardParams::k3x10().with_yoon(((1u32 << 11) - 1) as u16).unwrap();
@@ -1548,5 +1877,246 @@ mod tests {
             swap_would_violate(&layout, YA_ID, l1_char_at_p, &pairs),
             "ゃ moving onto a consonant's physical key must violate"
         );
+    }
+
+    #[test]
+    fn move_frequency_penalty_is_bounded_and_ordered() {
+        let mut mf = MoveFrequency::new();
+        // 記録が空なら係数によらずペナルティは効かない
+        assert_eq!(mf.penalty_coef(0.8), 0.0);
+
+        for _ in 0..4 {
+            mf.record(0, 1);
+        }
+        mf.record(2, 3);
+        let scale = mf.penalty_coef(0.8);
+
+        // 最頻の手はちょうど係数、未使用の手は 0、中間はその間
+        assert!((mf.penalty(pair_key(0, 1), scale) - 0.8).abs() < 1e-12);
+        assert_eq!(mf.penalty(pair_key(4, 5), scale), 0.0);
+        let mid = mf.penalty(pair_key(2, 3), scale);
+        assert!(mid > 0.0 && mid < 0.8, "mid={mid}");
+
+        // 係数0（無効化）は常にペナルティなし
+        assert_eq!(mf.penalty(pair_key(0, 1), mf.penalty_coef(0.0)), 0.0);
+    }
+
+    #[test]
+    fn move_frequency_is_symmetric_in_pair_order() {
+        let mut mf = MoveFrequency::new();
+        mf.record(7, 3);
+        mf.record(3, 7);
+        // (a,b) と (b,a) は同じスワップなので同じカウンタを共有する
+        assert_eq!(mf.counts[pair_key(3, 7)], 2);
+        assert_eq!(pair_key(3, 7), pair_key(7, 3));
+    }
+
+    #[test]
+    fn move_frequency_covers_every_char_pair() {
+        // pair_key が NUM_PAIRS に収まること（拗音面の仮想文字IDを含む全域）
+        let mut mf = MoveFrequency::new();
+        for a in 0..MAX_CHARS {
+            for b in (a + 1)..MAX_CHARS {
+                mf.record(a as CharId, b as CharId);
+            }
+        }
+        assert_eq!(mf.max_count, 1);
+    }
+
+    #[test]
+    fn tenure_from_ratio_rounds_and_keeps_a_positive_ratio_effective() {
+        // 近傍200手の 7.5% は15手
+        assert_eq!(tenure_from_ratio(0.075, 200), 15);
+        // 比0（無効）と近傍0（その操作が存在しない）は0手
+        assert_eq!(tenure_from_ratio(0.0, 200), 0);
+        assert_eq!(tenure_from_ratio(0.5, 0), 0);
+        // 比が正なら丸めで0にはせず、最低1手は禁止する
+        assert_eq!(tenure_from_ratio(0.01, 10), 1);
+    }
+
+    /// 拗音面の候補を生成し、実際に並んだ数と生成規則の式を返す。
+    fn measure_yoon_neighborhood(corpus_text: &str) -> (usize, usize) {
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let kp = KeyboardParams::k3x10()
+            .with_yoon(table.registry_mask())
+            .unwrap();
+        let corpus = Corpus::from_str_with_yoon(corpus_text, Some(&table));
+        let weights = Weights {
+            kp,
+            ..Default::default()
+        };
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            l1_only: &HashSet::new(),
+            pairs: &[],
+        };
+        let layout = Layout::initial(kp);
+        let yoon_chars: Vec<CharId> = kp.yoon_char_range().map(|c| c as CharId).collect();
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
+        let mut cache = DeltaPairCache::new();
+
+        let mut candidates = Vec::new();
+        generate_yoon_candidates(
+            &layout,
+            &ctx,
+            &yoon_chars,
+            usize::MAX / 4, // 全列挙させる
+            &mut rng,
+            &mut candidates,
+            &mut buf,
+            &mut cache,
+        );
+
+        let measured = count_by_kind(&candidates)[OpKind::SwapYoon as usize];
+        assert_eq!(measured, candidates.len());
+        let formula = yoon_pair_count(kp.num_consonants as usize, kp.yoon_char_count());
+        (measured, formula)
+    }
+
+    /// 近傍サイズが「生成規則の式」ではなく「実際に並んだ候補数」であること。
+    ///
+    /// 式は上界でしかない。生成器は無操作ペア（両端ともコーパス頻度0）を落とすので、
+    /// コーパスに出てこない子音があるとその分だけ実測が下回る。テニュアの分母は
+    /// この実測でなければ「近傍の何割を禁止するか」という意味が保てない。
+    #[test]
+    fn measured_neighborhood_drops_the_pairs_the_generator_skips() {
+        // 全子音が出てくるコーパスでは落ちるペアが無く、式と一致する（上界が密）
+        let (dense, formula) = measure_yoon_neighborhood(YOON_CORPUS);
+        assert_eq!(dense, formula);
+
+        // Ky しか出てこないコーパスでは、残りの子音を含むペアが無操作として落ちる
+        let (sparse, formula_sparse) = measure_yoon_neighborhood("きゃきゅきょきゃ");
+        assert_eq!(formula, formula_sparse, "式はコーパスに依存しない");
+        assert!(
+            sparse < dense,
+            "落とされたペアが反映されていない: 疎={sparse} 密={dense}"
+        );
+        assert!(sparse > 0, "候補が全部落ちてしまっている");
+    }
+
+    #[test]
+    fn count_by_kind_tallies_each_operator_separately() {
+        let c = |kind| Candidate { kind, c1: 0, c2: 1, delta: 0.0 };
+        let candidates = vec![
+            c(OpKind::SwapL2),
+            c(OpKind::SwapL1),
+            c(OpKind::SwapL2),
+            c(OpKind::InterLayer),
+        ];
+        let sizes = count_by_kind(&candidates);
+        assert_eq!(sizes[OpKind::SwapL1 as usize], 1);
+        assert_eq!(sizes[OpKind::SwapL2 as usize], 2);
+        assert_eq!(sizes[OpKind::InterLayer as usize], 1);
+        assert_eq!(sizes[OpKind::SwapYoon as usize], 0);
+        assert_eq!(count_by_kind(&[]), [0; NUM_OP_KINDS]);
+    }
+
+    /// hybrid では ゃゅょ の L1 引き上げが他の l1_only 文字より優先されること。
+    ///
+    /// setup_yoon_face は L1 の物理位置を見て子音の禁止位置を決めるので、ゃゅょ が
+    /// L2 に残ると同じ物理キーに子音が同居しうる。l1_only を多く指定して L1 の
+    /// 交換相手を使い切る設定でも、ゃゅょ だけは取りこぼしてはいけない。
+    #[test]
+    fn yoon_shift_keys_are_promoted_before_other_l1_only_chars() {
+        use crate::chars::{CHAR_LIST, YOON_SHIFT_IDS};
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let kp = KeyboardParams::k3x10()
+            .with_yoon(table.registry_mask())
+            .unwrap();
+
+        // ゃゅょ 以外の全文字が出てくるコーパス。改行で区切って拗音トークンの
+        // 合成を避ける。これで ゃゅょ だけが頻度0になり、頻度順では必ず最後に回る。
+        let text: String = (0..kp.num_chars)
+            .filter(|&c| !YOON_SHIFT_IDS.contains(&(c as CharId)))
+            .map(|c| format!("{}\n", CHAR_LIST[c]))
+            .collect();
+        let corpus = Corpus::from_str_with_yoon(&text, Some(&table));
+        for &c in &YOON_SHIFT_IDS {
+            assert_eq!(corpus.unigrams[c as usize], 0.0, "前提: ゃゅょ は頻度0");
+        }
+        let weights = Weights { kp, ..Default::default() };
+        let pairs: Vec<ExclusivePair> = Vec::new();
+
+        let mut layout = Layout::initial(kp);
+        assert!(
+            YOON_SHIFT_IDS.iter().any(|&c| !layout.is_l1(c)),
+            "前提: ゃゅょ の少なくとも1つは初期 L2"
+        );
+
+        // L1 の可動文字をちょうど3つだけ残し、他は全部 l1_only にする。
+        // 引き上げに成功できるのは3文字だけなので、順序が結果を決める。
+        let movable: Vec<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, &HashSet::new()) && !is_void(c))
+            .collect();
+        assert!(movable.len() > 3, "前提: L1 に可動文字が4つ以上ある");
+        let spared: HashSet<CharId> = movable[..3].iter().copied().collect();
+        let l1_only: HashSet<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| !is_void(c) && !spared.contains(&c))
+            .collect();
+
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let failed = promote_l1_only_chars(&mut layout, &ctx, kp);
+
+        assert!(
+            !failed.is_empty(),
+            "前提: L1 を使い切って引き上げ失敗が出る設定であること"
+        );
+        for &c in &YOON_SHIFT_IDS {
+            assert!(
+                layout.is_l1(c),
+                "ゃゅょ の CharId {c} が L1 に上がっていない（優先されていない）"
+            );
+        }
+    }
+
+    /// 極端な比を書かれてもテニュア確保でパニックしないこと。
+    /// `as usize` は無限大を usize::MAX、NaN を 0 に飽和させるので、
+    /// そのまま Vec::with_capacity に渡すと capacity overflow で落ちる。
+    #[test]
+    fn absurd_ratios_cannot_blow_up_the_tabu_capacity() {
+        for ratio in [1e20, f64::INFINITY, f64::MAX] {
+            let t = tenure_from_ratio(ratio, 200);
+            assert!(t <= NUM_PAIRS, "ratio={ratio} → {t} が全ペア数を超えた");
+        }
+        // 比として意味を持たない値はタブーを無効化する（0手）
+        assert_eq!(tenure_from_ratio(f64::NAN, 200), 0);
+        assert_eq!(tenure_from_ratio(f64::NEG_INFINITY, 200), 0);
+
+        // TabuSet の構築まで通しても落ちないこと
+        let config = SearchConfig {
+            tabu_ratio: [1e20; NUM_OP_KINDS],
+            ..SearchConfig::default()
+        };
+        let tabu = TabuSet::new(config.tabu_ratio, [200; NUM_OP_KINDS], 1, &config);
+        for kind in OpKind::ALL {
+            assert!(tabu.cur[kind as usize] <= NUM_PAIRS);
+        }
+    }
+
+    #[test]
+    fn tenure_scales_with_the_neighborhood() {
+        // 比で指定する狙いは「近傍が変わっても禁止する割合が保たれる」こと
+        let ratio = SearchConfig::default().tabu_ratio[OpKind::SwapL2 as usize];
+        assert_eq!(
+            tenure_from_ratio(ratio, 200) * 2,
+            tenure_from_ratio(ratio, 400),
+            "近傍が倍ならテニュアも倍になるべき"
+        );
+    }
+
+    #[test]
+    fn summary_lists_only_the_active_operators() {
+        let values = [1usize, 2, 3, 4];
+        let none = active_op_kinds(&KeyboardParams::k3x10());
+        assert_eq!(summarize_by_kind(&values, none), "l1=1 l2=2 inter=3");
+        let all = [true; NUM_OP_KINDS];
+        assert_eq!(summarize_by_kind(&values, all), "l1=1 l2=2 inter=3 yoon=4");
     }
 }

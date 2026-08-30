@@ -55,15 +55,10 @@ pub fn write_config_summary(
     let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
     let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
     let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
-    let yoon_tabu = if kp.yoon {
-        format!(" yoon={}", search_config.tabu_yoon)
-    } else {
-        String::new()
-    };
     let _ = writeln!(
         out,
-        " tabu           l1={} l2={} inter={}{}",
-        search_config.tabu_l1, search_config.tabu_l2, search_config.tabu_inter, yoon_tabu
+        " tabu(近傍比)   {}",
+        search::summarize_by_kind(&search_config.tabu_ratio, search::active_op_kinds(kp))
     );
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
     let _ = writeln!(
@@ -77,6 +72,12 @@ pub fn write_config_summary(
         search_config.tenure_grow_threshold,
         search_config.tenure_grow_interval,
         search_config.tenure_max_scale
+    );
+    let _ = writeln!(
+        out,
+        " diversification= {:.2}{}",
+        search_config.diversification,
+        if search_config.diversification > 0.0 { "" } else { "（無効）" }
     );
     let _ = writeln!(out, " initial_layout = {}",
         search_config.initial_layout_mode.config_label()

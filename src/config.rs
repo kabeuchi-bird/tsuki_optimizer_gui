@@ -39,6 +39,12 @@ pub struct RunConfig {
     pub max_iter: Option<usize>,
     pub restart_after: Option<usize>,
     pub max_restarts: Option<usize>,
+    /// タブーテニュア（近傍サイズ比）。`[run.tabu_ratio]` サブテーブル。
+    #[serde(default)]
+    pub tabu_ratio: TabuRatioConfig,
+
+    /// 廃止済み（絶対手数指定）。`deny_unknown_fields` で古い設定が即エラーに
+    /// ならないよう受け取るだけで、値は使わず警告する。
     pub tabu_l1: Option<usize>,
     pub tabu_l2: Option<usize>,
     pub tabu_inter: Option<usize>,
@@ -50,11 +56,23 @@ pub struct RunConfig {
     pub tenure_grow_threshold: Option<f64>,
     pub tenure_grow_interval: Option<usize>,
     pub tenure_max_scale: Option<f64>,
+    /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
+    pub diversification: Option<f64>,
 
     /// キーボードサイズ: "3x10"（デフォルト）/ "3x10_single_shift" / "3x11"
     pub keyboard_size: Option<String>,
     /// 初期配列モード: "2-263"（デフォルト）または "random"
     pub initial_layout: Option<String>,
+}
+
+/// [run.tabu_ratio] サブテーブル。キー名から `OpKind` への対応をここ1か所で持つ。
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TabuRatioConfig {
+    pub l1: Option<f64>,
+    pub l2: Option<f64>,
+    pub inter: Option<f64>,
+    pub yoon: Option<f64>,
 }
 
 // ──────────────────────────────────────
@@ -118,6 +136,26 @@ impl Config {
         }
     }
 
+    /// 設定ファイル固有の検証（`SearchConfig::validate` と同じ出力先へ書く）。
+    ///
+    /// `build_search_config` は副作用を持たせず、警告はこちらに集める。
+    pub fn validate(&self, out: &mut impl std::io::Write) {
+        let r = &self.run;
+        for (key, given) in [
+            ("tabu_l1", r.tabu_l1.is_some()),
+            ("tabu_l2", r.tabu_l2.is_some()),
+            ("tabu_inter", r.tabu_inter.is_some()),
+            ("tabu_yoon", r.tabu_yoon.is_some()),
+        ] {
+            if given {
+                let _ = writeln!(
+                    out,
+                    "警告: {key} は廃止されました（絶対手数指定）→ 無視します。近傍サイズ比で指定する [run.tabu_ratio] を使ってください"
+                );
+            }
+        }
+    }
+
     /// デフォルト値と設定ファイルの内容をマージして SearchConfig を生成する
     pub fn build_search_config(&self) -> SearchConfig {
         let r = &self.run;
@@ -126,10 +164,17 @@ impl Config {
             max_iter: r.max_iter.unwrap_or(d.max_iter),
             restart_after: r.restart_after.unwrap_or(d.restart_after),
             max_restarts: r.max_restarts.unwrap_or(d.max_restarts),
-            tabu_l1: r.tabu_l1.unwrap_or(d.tabu_l1),
-            tabu_l2: r.tabu_l2.unwrap_or(d.tabu_l2),
-            tabu_inter: r.tabu_inter.unwrap_or(d.tabu_inter),
-            tabu_yoon: r.tabu_yoon.unwrap_or(d.tabu_yoon),
+            tabu_ratio: {
+                let t = &r.tabu_ratio;
+                let mut ratio = d.tabu_ratio;
+                // 並び順は OpKind の判別子（SwapL1, SwapL2, InterLayer, SwapYoon）に対応
+                for (i, v) in [t.l1, t.l2, t.inter, t.yoon].into_iter().enumerate() {
+                    if let Some(v) = v {
+                        ratio[i] = v;
+                    }
+                }
+                ratio
+            },
             inter_sample: r.inter_sample.unwrap_or(d.inter_sample),
             ab_sample_limit: r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
             log_interval: r.log_interval.unwrap_or(d.log_interval),
@@ -137,6 +182,7 @@ impl Config {
             tenure_grow_threshold: r.tenure_grow_threshold.unwrap_or(d.tenure_grow_threshold),
             tenure_grow_interval: r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
             tenure_max_scale: r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
+            diversification: r.diversification.unwrap_or(d.diversification),
             initial_layout_mode: self.build_initial_layout_mode(),
         }
     }
@@ -383,7 +429,7 @@ mod tests {
         let sc = config.build_search_config();
         assert!(sc.max_iter > 0);
         assert!(sc.restart_after > 0);
-        assert!(sc.tabu_l1 > 0);
+        assert!(sc.tabu_ratio.iter().all(|&r| r > 0.0));
     }
 
     #[test]
