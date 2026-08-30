@@ -34,10 +34,11 @@ impl TabuList {
         }
     }
 
+    /// 候補ループから1候補につき1回呼ばれるので、インデックスは呼び出し側で
+    /// 一度だけ計算したものを受け取る（タブー判定と頻度参照で使い回すため）。
     #[inline]
-    fn contains(&self, c1: CharId, c2: CharId) -> bool {
-        let (a, b) = normalize_pair(c1, c2);
-        bitset_test(&self.bitset, pair_index(a as usize, b as usize))
+    fn contains_idx(&self, idx: usize) -> bool {
+        bitset_test(&self.bitset, idx)
     }
 
     fn add(&mut self, c1: CharId, c2: CharId) {
@@ -63,7 +64,7 @@ impl TabuList {
 
 /// n 要素から2つ選ぶ組み合わせ数
 #[inline]
-fn pair_count(n: usize) -> usize {
+const fn pair_count(n: usize) -> usize {
     n * n.saturating_sub(1) / 2
 }
 
@@ -84,10 +85,13 @@ fn yoon_pair_count(k: usize, n: usize) -> usize {
 /// サンプリング」という規則なので、近傍サイズは両者の小さい方になる。テニュアは
 /// この値への比で指定するため、生成側と同じ式をここで共有する。
 ///
-/// L1/L2 の文字数は層間スワップが1対1交換なので探索中に変化せず、拗音面の文字数も
-/// キーボード設定から決まる。よって探索開始時に一度求めれば足りる。
+/// L1/L2 の文字数は探索中に変化しないので、開始時に一度求めれば足りる。これは
+/// 層間スワップが1対1交換であることに加え、候補生成・撹乱の双方が void と固定文字を
+/// 両側から除外していることに依る（`generate_inter_layer_candidates` /
+/// `random_perturbation`）。他モジュール側の性質に頼る不変条件なので、ループ内で
+/// `debug_assert` して崩れたら気づけるようにしてある。
 fn neighborhood_sizes(
-    layout: &Layout,
+    kp: &KeyboardParams,
     l1_free: usize,
     l2_free: usize,
     config: &SearchConfig,
@@ -97,26 +101,26 @@ fn neighborhood_sizes(
     sizes[OpKind::SwapL1 as usize] = pair_count(l1_free).min(ab);
     sizes[OpKind::SwapL2 as usize] = pair_count(l2_free).min(ab);
     sizes[OpKind::InterLayer as usize] = config.inter_sample;
-    if layout.kp.yoon {
-        let k = layout.kp.num_consonants as usize;
-        let n = layout.kp.yoon_char_count();
-        sizes[OpKind::SwapYoon as usize] = yoon_pair_count(k, n).min(ab);
+    if kp.yoon {
+        let k = kp.num_consonants as usize;
+        sizes[OpKind::SwapYoon as usize] = yoon_pair_count(k, kp.yoon_char_count()).min(ab);
     }
     sizes
 }
 
-/// `OpKind` 添字の配列をログ用に整形する（"l1=15 l2=15 inter=25 [yoon=15]"）
-fn summarize_by_kind(values: &[usize; NUM_OP_KINDS], yoon: bool) -> String {
-    let mut s = format!(
-        "l1={} l2={} inter={}",
-        values[OpKind::SwapL1 as usize],
-        values[OpKind::SwapL2 as usize],
-        values[OpKind::InterLayer as usize]
-    );
-    if yoon {
-        s.push_str(&format!(" yoon={}", values[OpKind::SwapYoon as usize]));
-    }
-    s
+/// `OpKind` 添字の配列をログ用に整形する（"l1=15 l2=15 inter=25 [yoon=15]"）。
+///
+/// 表示する種別は `active` で決めるので、この関数自体は操作種別を知らない。
+pub(crate) fn summarize_by_kind<T: std::fmt::Display>(
+    values: &[T; NUM_OP_KINDS],
+    active: [bool; NUM_OP_KINDS],
+) -> String {
+    OpKind::ALL
+        .iter()
+        .filter(|k| active[**k as usize])
+        .map(|k| format!("{}={}", k.key(), values[*k as usize]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 近傍サイズ比から実際のテニュア（禁止する手数）を求める。
@@ -151,9 +155,7 @@ struct TabuSet {
 
 impl TabuSet {
     /// 設定と拡大パラメータからタブーリスト一式を構築する。
-    ///
     /// テニュアは近傍サイズ比で与えられるので、ここで実際の手数へ変換する。
-    /// 比が正なら最低1手は禁止する（丸めで0になって無効化するのを防ぐ）。
     fn new(
         ratios: [f64; NUM_OP_KINDS],
         neighborhood: [usize; NUM_OP_KINDS],
@@ -178,8 +180,8 @@ impl TabuSet {
     }
 
     #[inline]
-    fn contains(&self, kind: OpKind, c1: CharId, c2: CharId) -> bool {
-        self.lists[kind as usize].contains(c1, c2)
+    fn contains_idx(&self, kind: OpKind, idx: usize) -> bool {
+        self.lists[kind as usize].contains_idx(idx)
     }
 
     #[inline]
@@ -226,8 +228,8 @@ impl TabuSet {
     }
 
     /// ログ表示用の現在テニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
-    fn tenure_summary(&self, yoon: bool) -> String {
-        summarize_by_kind(&self.cur, yoon)
+    fn tenure_summary(&self, active: [bool; NUM_OP_KINDS]) -> String {
+        summarize_by_kind(&self.cur, active)
     }
 }
 
@@ -243,11 +245,16 @@ impl TabuSet {
 ///
 /// ここでは各スワップペアの適用回数を数え、停滞時に「よく使った手」へペナルティを
 /// 課すことで、山登りの方向を未探索側へ向ける。
+///
+/// `TabuSet` と違い `OpKind` では分けず、文字ペアだけを鍵にしている。ある瞬間に
+/// あるペアを動かせる操作は1つに定まる（両方L1ならL1内、両方L2ならL2内、層をまたぐ
+/// なら層間、拗音面は CharId 空間が独立）ので区別する必要がなく、むしろ「この2文字を
+/// 何度入れ替えたか」という操作非依存の量のほうが長期記憶として素直だからでもある。
 /// ——————————————————————————————
 struct MoveFrequency {
     /// pair_index -> そのペアが適用された回数
     counts: Vec<u32>,
-    /// 正規化用（ペナルティを [0, coef] に収めるため）
+    /// 正規化用。最頻の手のペナルティがちょうど係数と一致するようにする。
     max_count: u32,
 }
 
@@ -261,11 +268,19 @@ impl MoveFrequency {
 
     #[inline]
     fn record(&mut self, c1: CharId, c2: CharId) {
-        let (a, b) = normalize_pair(c1, c2);
-        let idx = pair_index(a as usize, b as usize);
+        let idx = pair_key(c1, c2);
         self.counts[idx] += 1;
-        if self.counts[idx] > self.max_count {
-            self.max_count = self.counts[idx];
+        self.max_count = self.max_count.max(self.counts[idx]);
+    }
+
+    /// 停滞時に効かせる係数。記録が空のうちは 0 を返してペナルティを無効化する
+    /// （そのぶん `penalty` 側は 0除算を気にしなくてよい）。
+    #[inline]
+    fn penalty_coef(&self, diversification: f64) -> f64 {
+        if self.max_count == 0 {
+            0.0
+        } else {
+            diversification
         }
     }
 
@@ -273,13 +288,15 @@ impl MoveFrequency {
     ///
     /// 上限を coef に抑えることで、真の改善手（デルタが大きく負）を打ち消さずに
     /// 「デルタがほぼ0の手」同士の優先順位だけを入れ替えられる。
+    ///
+    /// インデックスは呼び出し側がタブー判定と共用したものを渡す。正規化の除算を
+    /// 反復ごとに畳むと約2%速くなるが、丸め順序が変わって既存のシード結果が
+    /// 動くため、再現性を優先してこの順序のまま残している。
     #[inline]
-    fn penalty(&self, c1: CharId, c2: CharId, coef: f64) -> f64 {
-        if coef == 0.0 || self.max_count == 0 {
+    fn penalty(&self, idx: usize, coef: f64) -> f64 {
+        if coef == 0.0 {
             return 0.0;
         }
-        let (a, b) = normalize_pair(c1, c2);
-        let idx = pair_index(a as usize, b as usize);
         coef * (self.counts[idx] as f64 / self.max_count as f64)
     }
 }
@@ -294,7 +311,7 @@ fn normalize_pair(a: CharId, b: CharId) -> (CharId, CharId) {
 }
 
 /// ペアの三角行列インデックス（TabuList / DeltaPairCache 共用）
-const NUM_PAIRS: usize = MAX_CHARS * (MAX_CHARS - 1) / 2;
+const NUM_PAIRS: usize = pair_count(MAX_CHARS);
 const BITS_PER_WORD: usize = u64::BITS as usize;
 const VALID_WORDS: usize = NUM_PAIRS.div_ceil(BITS_PER_WORD);
 
@@ -305,6 +322,16 @@ const _: () = assert!(MAX_CHARS <= 128, "MAX_CHARS must be <= 128 for u128 dirty
 fn pair_index(a: usize, b: usize) -> usize {
     debug_assert!(a < b && b < MAX_CHARS);
     a * (2 * MAX_CHARS - a - 1) / 2 + (b - a - 1)
+}
+
+/// 順不同の文字ペアを三角行列インデックスへ。
+///
+/// タブー判定・頻度記録・デルタキャッシュはどれも「順不同のペア」を鍵にするので、
+/// 正規化とインデックス化はここ1か所にまとめる。
+#[inline]
+fn pair_key(c1: CharId, c2: CharId) -> usize {
+    let (a, b) = normalize_pair(c1, c2);
+    pair_index(a as usize, b as usize)
 }
 
 #[inline]
@@ -462,6 +489,36 @@ pub enum OpKind {
 /// `OpKind` の種類数（`TabuSet` の配列長）
 const NUM_OP_KINDS: usize = 4;
 
+impl OpKind {
+    /// 全種類。操作を増やしたらここに足せば、種別ごとの走査は自動で追随する。
+    const ALL: [OpKind; NUM_OP_KINDS] = [
+        OpKind::SwapL1,
+        OpKind::SwapL2,
+        OpKind::InterLayer,
+        OpKind::SwapYoon,
+    ];
+
+    /// 設定キー・ログ表示に使う短い名前
+    fn key(self) -> &'static str {
+        match self {
+            OpKind::SwapL1 => "l1",
+            OpKind::SwapL2 => "l2",
+            OpKind::InterLayer => "inter",
+            OpKind::SwapYoon => "yoon",
+        }
+    }
+}
+
+/// その盤面設定で実際に使う操作種別。
+///
+/// 「どの操作が有効か」の判断をここ1か所に閉じ込め、ログ整形や設定表示が
+/// `if kp.yoon` を各所に持たなくて済むようにする。
+pub(crate) fn active_op_kinds(kp: &KeyboardParams) -> [bool; NUM_OP_KINDS] {
+    let mut active = [true; NUM_OP_KINDS];
+    active[OpKind::SwapYoon as usize] = kp.yoon;
+    active
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     kind: OpKind,
@@ -519,16 +576,13 @@ pub struct SearchConfig {
     pub max_iter: usize,
     pub restart_after: usize,
     pub max_restarts: usize,
-    /// タブーテニュア（近傍サイズ比）。L1内 / L2内 / 層間 / 拗音面内で個別に指定する。
+    /// タブーテニュア（近傍サイズ比）。`OpKind` 添字。
     ///
     /// 絶対手数ではなく比で持つのは、意味のある量が「近傍のうち何割を禁止するか」
     /// だから。文字数・盤面サイズ・`ab_sample_limit` / `inter_sample` が変われば
     /// 近傍サイズも変わるが、比で指定しておけば探索の締まり具合は保たれる。
-    pub tabu_ratio_l1: f64,
-    pub tabu_ratio_l2: f64,
-    pub tabu_ratio_inter: f64,
-    /// 拗音面内スワップのテニュア比（hybrid のみ使用）
-    pub tabu_ratio_yoon: f64,
+    /// 既定値の根拠（掃引結果）は config.toml を参照。
+    pub tabu_ratio: [f64; NUM_OP_KINDS],
     pub inter_sample: usize,
     pub ab_sample_limit: usize,
     pub log_interval: usize,
@@ -541,8 +595,7 @@ pub struct SearchConfig {
     /// 停滞時に「よく使ったスワップ」へ最大この値のペナルティを課し、探索を
     /// 未探索方向へ押し出す。0 付近のデルタしか持たないプラトー上の手が大半なので、
     /// この値はプラトーの手同士の順位を入れ替えるのに十分な大きさが要る。
-    /// 8シード×20000反復の掃引では none/hybrid とも 0.4〜1.5 が平坦な最良域で、
-    /// 3.0 では悪化した（真の改善手を打ち消し始める）。既定 0.8 はその中央。
+    /// 既定値の根拠（掃引結果）は config.toml を参照。
     pub diversification: f64,
     pub initial_layout_mode: InitialLayoutMode,
 }
@@ -553,10 +606,7 @@ impl Default for SearchConfig {
             max_iter: 50_000,
             restart_after: 3_000,
             max_restarts: 10,
-            tabu_ratio_l1: 0.075,
-            tabu_ratio_l2: 0.075,
-            tabu_ratio_inter: 0.30,
-            tabu_ratio_yoon: 0.075,
+            tabu_ratio: [0.075, 0.075, 0.30, 0.075],
             inter_sample: 80,
             ab_sample_limit: 200,
             log_interval: 1_000,
@@ -571,16 +621,6 @@ impl Default for SearchConfig {
 }
 
 impl SearchConfig {
-    /// テニュア比を `OpKind` 添字の配列にまとめる
-    fn tabu_ratios(&self) -> [f64; NUM_OP_KINDS] {
-        let mut r = [0.0; NUM_OP_KINDS];
-        r[OpKind::SwapL1 as usize] = self.tabu_ratio_l1;
-        r[OpKind::SwapL2 as usize] = self.tabu_ratio_l2;
-        r[OpKind::InterLayer as usize] = self.tabu_ratio_inter;
-        r[OpKind::SwapYoon as usize] = self.tabu_ratio_yoon;
-        r
-    }
-
     /// 設定値を検証し、問題があれば警告メッセージを返す
     pub fn validate(&self, out: &mut impl Write) {
         if self.max_iter == 0 {
@@ -595,16 +635,13 @@ impl SearchConfig {
         if self.restart_after == 0 {
             let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
         }
-        for (name, ratio) in [
-            ("tabu_ratio_l1", self.tabu_ratio_l1),
-            ("tabu_ratio_l2", self.tabu_ratio_l2),
-            ("tabu_ratio_inter", self.tabu_ratio_inter),
-            ("tabu_ratio_yoon", self.tabu_ratio_yoon),
-        ] {
+        for kind in OpKind::ALL {
+            let ratio = self.tabu_ratio[kind as usize];
             if ratio >= 1.0 {
                 let _ = writeln!(
                     out,
-                    "警告: {name}={ratio} → 近傍の全手がタブーになり、アスピレーション以外は選べません（1.0未満を推奨）"
+                    "警告: tabu_ratio.{}={ratio} → 近傍の全手がタブーになり、アスピレーション以外は選べません（1.0未満を推奨）",
+                    kind.key()
                 );
             }
         }
@@ -657,14 +694,15 @@ pub fn run(
     // 層間スワップは1対1交換で L1/L2 の文字数を変えないため、この値は探索中不変。
     collect_l1_free_chars_into(&current, &mut l1_free);
     collect_l2_chars_into(&current, &mut l2_free);
-    let neighborhood = neighborhood_sizes(&current, l1_free.len(), l2_free.len(), config);
-    let mut tabu = TabuSet::new(config.tabu_ratios(), neighborhood, grow_period, config);
+    let neighborhood = neighborhood_sizes(&current.kp, l1_free.len(), l2_free.len(), config);
+    let active = active_op_kinds(&current.kp);
+    let mut tabu = TabuSet::new(config.tabu_ratio, neighborhood, grow_period, config);
     // テニュアは比指定なので、実際に何手を禁止することになったかを一度だけ出す
     let _ = writeln!(
         out,
         " 近傍サイズ     {}\n テニュア(実手数) {}",
-        summarize_by_kind(&neighborhood, current.kp.yoon),
-        tabu.tenure_summary(current.kp.yoon)
+        summarize_by_kind(&neighborhood, active),
+        tabu.tenure_summary(active)
     );
     // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
     let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
@@ -684,6 +722,12 @@ pub fn run(
         candidates.clear();
 
         collect_l1_free_chars_into(&current, &mut l1_free);
+        // 近傍サイズを開始時に一度しか求めない前提（層をまたぐ交換が1対1で、
+        // void と固定文字が両側から除外されていること）が崩れていないか確かめる
+        debug_assert_eq!(
+            pair_count(l1_free.len()).min(config.ab_sample_limit),
+            neighborhood[OpKind::SwapL1 as usize]
+        );
         generate_swap_candidates(
             &current,
             ctx,
@@ -697,6 +741,10 @@ pub fn run(
         );
 
         collect_l2_chars_into(&current, &mut l2_free);
+        debug_assert_eq!(
+            pair_count(l2_free.len()).min(config.ab_sample_limit),
+            neighborhood[OpKind::SwapL2 as usize]
+        );
         generate_swap_candidates(
             &current,
             ctx,
@@ -741,25 +789,30 @@ pub fn run(
         // O(n) で最良候補を選択（ソート不要）
         // best_free: タブーでない最良候補
         // best_aspiration: タブーだがベストスコアを更新する最良候補
-        let mut best_free: Option<(Candidate, f64)> = None;
+        let mut best_free: Option<Candidate> = None;
+        // best_free の比較に使うペナルティ込みの値。ループ内でしか使わないので
+        // Option には持たせない（選ばれた手のスコア更新は常に生デルタ）。
+        let mut best_free_key = f64::INFINITY;
         let mut best_aspiration: Option<Candidate> = None;
         let aspiration_threshold = best_score - current_score;
 
         // 停滞している間だけ多様化ペナルティを効かせる。閾値はテニュア拡大と共有し、
         // 「停滞したらタブーを伸ばし、同時に未探索方向へ誘導する」を一貫させる。
         let diversify = if config.diversification > 0.0 && no_improve > tenure_grow_start {
-            config.diversification
+            move_freq.penalty_coef(config.diversification)
         } else {
             0.0
         };
 
         for &cand in &candidates {
-            let is_tabu = tabu.contains(cand.kind, cand.c1, cand.c2);
-            if !is_tabu {
+            // タブー判定と頻度参照は同じペアキーを見るので、1候補につき一度だけ引く
+            let idx = pair_key(cand.c1, cand.c2);
+            if !tabu.contains_idx(cand.kind, idx) {
                 // 比較にはペナルティ込みの値を使うが、スコア更新は生デルタで行う
-                let key = cand.delta + move_freq.penalty(cand.c1, cand.c2, diversify);
-                if best_free.is_none_or(|(_, k)| key < k) {
-                    best_free = Some((cand, key));
+                let key = cand.delta + move_freq.penalty(idx, diversify);
+                if key < best_free_key {
+                    best_free_key = key;
+                    best_free = Some(cand);
                 }
             } else if cand.delta < aspiration_threshold
                 && best_aspiration.is_none_or(|a| cand.delta < a.delta)
@@ -770,10 +823,10 @@ pub fn run(
         }
 
         let chosen = match (best_free, best_aspiration) {
-            (Some((f, _)), Some(a)) => {
+            (Some(f), Some(a)) => {
                 if a.delta < f.delta { a } else { f }
             }
-            (Some((f, _)), None) => f,
+            (Some(f), None) => f,
             (None, Some(a)) => a,
             (None, None) => continue,
         };
@@ -815,7 +868,7 @@ pub fn run(
             let _ = writeln!(out,
                 "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure {}{}",
                 iter, current_score, best_score, no_improve,
-                tabu.tenure_summary(current.kp.yoon),
+                tabu.tenure_summary(active),
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
             on_update(&SearchUpdate {
@@ -1829,22 +1882,23 @@ mod tests {
     #[test]
     fn move_frequency_penalty_is_bounded_and_ordered() {
         let mut mf = MoveFrequency::new();
-        // 未使用の手はペナルティ0（記録が空でも安全）
-        assert_eq!(mf.penalty(0, 1, 0.8), 0.0);
+        // 記録が空なら係数によらずペナルティは効かない
+        assert_eq!(mf.penalty_coef(0.8), 0.0);
 
         for _ in 0..4 {
             mf.record(0, 1);
         }
         mf.record(2, 3);
+        let scale = mf.penalty_coef(0.8);
 
-        // 最頻の手はちょうど coef、未使用の手は 0、中間はその間
-        assert!((mf.penalty(0, 1, 0.8) - 0.8).abs() < 1e-12);
-        assert_eq!(mf.penalty(4, 5, 0.8), 0.0);
-        let mid = mf.penalty(2, 3, 0.8);
+        // 最頻の手はちょうど係数、未使用の手は 0、中間はその間
+        assert!((mf.penalty(pair_key(0, 1), scale) - 0.8).abs() < 1e-12);
+        assert_eq!(mf.penalty(pair_key(4, 5), scale), 0.0);
+        let mid = mf.penalty(pair_key(2, 3), scale);
         assert!(mid > 0.0 && mid < 0.8, "mid={mid}");
 
         // 係数0（無効化）は常にペナルティなし
-        assert_eq!(mf.penalty(0, 1, 0.0), 0.0);
+        assert_eq!(mf.penalty(pair_key(0, 1), mf.penalty_coef(0.0)), 0.0);
     }
 
     #[test]
@@ -1853,13 +1907,13 @@ mod tests {
         mf.record(7, 3);
         mf.record(3, 7);
         // (a,b) と (b,a) は同じスワップなので同じカウンタを共有する
-        assert_eq!(mf.counts[pair_index(3, 7)], 2);
-        assert_eq!(mf.penalty(3, 7, 1.0), mf.penalty(7, 3, 1.0));
+        assert_eq!(mf.counts[pair_key(3, 7)], 2);
+        assert_eq!(pair_key(3, 7), pair_key(7, 3));
     }
 
     #[test]
     fn move_frequency_covers_every_char_pair() {
-        // pair_index が NUM_PAIRS に収まること（拗音面の仮想文字IDを含む全域）
+        // pair_key が NUM_PAIRS に収まること（拗音面の仮想文字IDを含む全域）
         let mut mf = MoveFrequency::new();
         for a in 0..MAX_CHARS {
             for b in (a + 1)..MAX_CHARS {
@@ -1880,11 +1934,62 @@ mod tests {
         assert_eq!(tenure_from_ratio(0.01, 10), 1);
     }
 
+    /// 近傍サイズが候補生成器の実際の生成数と一致すること。
+    /// テニュアの意味（近傍の何割を禁止するか）はこの一致に乗っているので、
+    /// 式を写して比べるのではなく生成器を実際に走らせて数える。
     #[test]
-    fn neighborhood_size_matches_what_the_generator_would_produce() {
-        // 全ペア数が上限以下なら全ペア、超えるなら上限。生成器と同じ規則であること。
-        assert_eq!(pair_count(20).min(200), 190);
-        assert_eq!(pair_count(30).min(200), 200);
+    fn neighborhood_size_matches_what_the_generator_produces() {
+        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(KeyboardParams::k3x10());
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            l1_only: &l1_only,
+            pairs: &pairs,
+        };
+        let layout = Layout::initial(KeyboardParams::k3x10());
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
+        let mut cache = DeltaPairCache::new();
+
+        // 全列挙になるよう十分大きい上限を与えれば、生成数＝近傍サイズになる
+        let config = SearchConfig {
+            ab_sample_limit: usize::MAX / 4,
+            ..SearchConfig::default()
+        };
+        let mut l2 = Vec::new();
+        collect_l2_chars_into(&layout, &mut l2);
+        let mut out = Vec::new();
+        generate_swap_candidates(
+            &layout,
+            &ctx,
+            &l2,
+            OpKind::SwapL2,
+            config.ab_sample_limit,
+            &mut rng,
+            &mut out,
+            &mut buf,
+            &mut cache,
+        );
+
+        let mut l1 = Vec::new();
+        collect_l1_free_chars_into(&layout, &mut l1);
+        let sizes = neighborhood_sizes(&layout.kp, l1.len(), l2.len(), &config);
+        assert_eq!(sizes[OpKind::SwapL2 as usize], out.len());
+    }
+
+    #[test]
+    fn neighborhood_is_capped_by_the_sampling_limit() {
+        let config = SearchConfig::default();
+        let kp = KeyboardParams::k3x10();
+        // 全ペア数が上限を超える側では、近傍サイズは上限そのもの
+        let big = neighborhood_sizes(&kp, 30, 30, &config);
+        assert_eq!(big[OpKind::SwapL2 as usize], config.ab_sample_limit);
+        // 下回る側では全ペア数
+        let small = neighborhood_sizes(&kp, 5, 5, &config);
+        assert_eq!(small[OpKind::SwapL2 as usize], pair_count(5));
+        // 層間はサンプリング数そのもの、拗音面は none では存在しない
+        assert_eq!(big[OpKind::InterLayer as usize], config.inter_sample);
+        assert_eq!(big[OpKind::SwapYoon as usize], 0);
         // 拗音面は「少なくとも一方が子音」なので単純な組み合わせ数にはならない
         assert_eq!(yoon_pair_count(3, 5), 3 + 3 * 2);
         assert_eq!(yoon_pair_count(0, 5), 0);
@@ -1894,12 +1999,22 @@ mod tests {
     #[test]
     fn tenure_scales_with_the_sampling_limit() {
         // 比で指定する狙いは「上限を変えても禁止する割合が保たれる」こと
+        let kp = KeyboardParams::k3x10();
         let mut cfg = SearchConfig::default();
-        let ratio = cfg.tabu_ratio_l2;
+        let ratio = cfg.tabu_ratio[OpKind::SwapL2 as usize];
         cfg.ab_sample_limit = 200;
-        let small = tenure_from_ratio(ratio, pair_count(40).min(cfg.ab_sample_limit));
+        let small = tenure_from_ratio(ratio, neighborhood_sizes(&kp, 40, 40, &cfg)[1]);
         cfg.ab_sample_limit = 400;
-        let large = tenure_from_ratio(ratio, pair_count(40).min(cfg.ab_sample_limit));
+        let large = tenure_from_ratio(ratio, neighborhood_sizes(&kp, 40, 40, &cfg)[1]);
         assert_eq!(small * 2, large, "上限を倍にしたらテニュアも倍になるべき");
+    }
+
+    #[test]
+    fn summary_lists_only_the_active_operators() {
+        let values = [1usize, 2, 3, 4];
+        let none = active_op_kinds(&KeyboardParams::k3x10());
+        assert_eq!(summarize_by_kind(&values, none), "l1=1 l2=2 inter=3");
+        let all = [true; NUM_OP_KINDS];
+        assert_eq!(summarize_by_kind(&values, all), "l1=1 l2=2 inter=3 yoon=4");
     }
 }

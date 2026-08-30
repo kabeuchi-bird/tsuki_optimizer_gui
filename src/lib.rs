@@ -55,18 +55,10 @@ pub fn write_config_summary(
     let _ = writeln!(out, " max_iter      = {}", search_config.max_iter);
     let _ = writeln!(out, " restart_after = {}", search_config.restart_after);
     let _ = writeln!(out, " max_restarts  = {}", search_config.max_restarts);
-    let yoon_tabu = if kp.yoon {
-        format!(" yoon={:.3}", search_config.tabu_ratio_yoon)
-    } else {
-        String::new()
-    };
     let _ = writeln!(
         out,
-        " tabu(近傍比)   l1={:.3} l2={:.3} inter={:.3}{}",
-        search_config.tabu_ratio_l1,
-        search_config.tabu_ratio_l2,
-        search_config.tabu_ratio_inter,
-        yoon_tabu
+        " tabu(近傍比)   {}",
+        search::summarize_by_kind(&search_config.tabu_ratio, search::active_op_kinds(kp))
     );
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
     let _ = writeln!(

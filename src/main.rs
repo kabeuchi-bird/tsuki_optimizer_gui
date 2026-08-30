@@ -254,6 +254,7 @@ fn main() {
     tsuki_optimize::write_corpus_stats(&mut out, &corpus.stats);
 
     // ── 設定検証 ────────────────────────────────
+    toml_config.validate(&mut out);
     search_config.validate(&mut out);
 
     // ── 設定サマリ表示 ───────────────────────────
