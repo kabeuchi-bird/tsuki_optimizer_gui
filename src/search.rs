@@ -115,10 +115,14 @@ pub(crate) fn summarize_by_kind<T: std::fmt::Display>(
 /// 「比を指定したのにタブーが効かない」という無言の無効化を避けるため。
 #[inline]
 fn tenure_from_ratio(ratio: f64, neighborhood: usize) -> usize {
-    if ratio <= 0.0 || neighborhood == 0 {
+    // NaN や無限大は比として意味を持たない。`as usize` は NaN を 0、無限大を
+    // usize::MAX に飽和させるので、ここで弾かないと後段の確保サイズが破綻する。
+    if !ratio.is_finite() || ratio <= 0.0 || neighborhood == 0 {
         return 0;
     }
-    ((ratio * neighborhood as f64).round() as usize).max(1)
+    // タブーリストはペア単位で重複排除されるため、格納しうる要素数は全ペア数が上限。
+    // それを超える容量は必ず無駄で、極端な比（例 1e20）では確保時にパニックする。
+    ((ratio * neighborhood as f64).round() as usize).clamp(1, NUM_PAIRS)
 }
 
 /// ——————————————————————————————
@@ -155,7 +159,8 @@ impl TabuSet {
                 .ceil()
                 .max(1.0) as usize
         });
-        let max = base.map(|b| (b as f64 * config.tenure_max_scale) as usize);
+        // 拡大後の上限も同じ理由で全ペア数に頭打ちする
+        let max = base.map(|b| ((b as f64 * config.tenure_max_scale) as usize).min(NUM_PAIRS));
         TabuSet {
             lists: std::array::from_fn(|i| TabuList::new(base[i])),
             base,
@@ -623,7 +628,13 @@ impl SearchConfig {
         }
         for kind in OpKind::ALL {
             let ratio = self.tabu_ratio[kind as usize];
-            if ratio >= 1.0 {
+            if !ratio.is_finite() {
+                let _ = writeln!(
+                    out,
+                    "警告: tabu_ratio.{}={ratio} は比として無効です → その操作のタブーを無効化します",
+                    kind.key()
+                );
+            } else if ratio >= 1.0 {
                 let _ = writeln!(
                     out,
                     "警告: tabu_ratio.{}={ratio} → 近傍の全手がタブーになり、アスピレーション以外は選べません（1.0未満を推奨）",
@@ -1321,7 +1332,16 @@ fn promote_l1_only_chars(
     let mut pending: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| ctx.l1_only.contains(&c) && !is_void(c) && !layout.is_l1(c))
         .collect();
-    pending.sort_unstable_by(|&a, &b| unigrams[b as usize].total_cmp(&unigrams[a as usize]));
+    // hybrid では ゃゅょ が L1 にいることが方式の前提になっている（setup_yoon_face は
+    // L1 の物理位置を見て子音の禁止位置を決めるので、L2 に残ると子音と同じキーに
+    // 同居しうる）。l1_only が多くて L1 の交換相手を使い切る設定でも取りこぼさないよう、
+    // ユーザー指定の l1_only 文字より先に処理する。
+    pending.sort_unstable_by(|&a, &b| {
+        let yoon_shift = |c: CharId| kp.yoon && crate::chars::is_yoon_shift_id(c);
+        yoon_shift(b)
+            .cmp(&yoon_shift(a))
+            .then_with(|| unigrams[b as usize].total_cmp(&unigrams[a as usize]))
+    });
 
     let mut failed = Vec::new();
     for c in pending {
@@ -1991,6 +2011,93 @@ mod tests {
         assert_eq!(sizes[OpKind::InterLayer as usize], 1);
         assert_eq!(sizes[OpKind::SwapYoon as usize], 0);
         assert_eq!(count_by_kind(&[]), [0; NUM_OP_KINDS]);
+    }
+
+    /// hybrid では ゃゅょ の L1 引き上げが他の l1_only 文字より優先されること。
+    ///
+    /// setup_yoon_face は L1 の物理位置を見て子音の禁止位置を決めるので、ゃゅょ が
+    /// L2 に残ると同じ物理キーに子音が同居しうる。l1_only を多く指定して L1 の
+    /// 交換相手を使い切る設定でも、ゃゅょ だけは取りこぼしてはいけない。
+    #[test]
+    fn yoon_shift_keys_are_promoted_before_other_l1_only_chars() {
+        use crate::chars::{CHAR_LIST, YOON_SHIFT_IDS};
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let kp = KeyboardParams::k3x10()
+            .with_yoon(table.registry_mask())
+            .unwrap();
+
+        // ゃゅょ 以外の全文字が出てくるコーパス。改行で区切って拗音トークンの
+        // 合成を避ける。これで ゃゅょ だけが頻度0になり、頻度順では必ず最後に回る。
+        let text: String = (0..kp.num_chars)
+            .filter(|&c| !YOON_SHIFT_IDS.contains(&(c as CharId)))
+            .map(|c| format!("{}\n", CHAR_LIST[c]))
+            .collect();
+        let corpus = Corpus::from_str_with_yoon(&text, Some(&table));
+        for &c in &YOON_SHIFT_IDS {
+            assert_eq!(corpus.unigrams[c as usize], 0.0, "前提: ゃゅょ は頻度0");
+        }
+        let weights = Weights { kp, ..Default::default() };
+        let pairs: Vec<ExclusivePair> = Vec::new();
+
+        let mut layout = Layout::initial(kp);
+        assert!(
+            YOON_SHIFT_IDS.iter().any(|&c| !layout.is_l1(c)),
+            "前提: ゃゅょ の少なくとも1つは初期 L2"
+        );
+
+        // L1 の可動文字をちょうど3つだけ残し、他は全部 l1_only にする。
+        // 引き上げに成功できるのは3文字だけなので、順序が結果を決める。
+        let movable: Vec<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| layout.is_l1(c) && is_inter_layer_movable(c, kp, &HashSet::new()) && !is_void(c))
+            .collect();
+        assert!(movable.len() > 3, "前提: L1 に可動文字が4つ以上ある");
+        let spared: HashSet<CharId> = movable[..3].iter().copied().collect();
+        let l1_only: HashSet<CharId> = (0..kp.num_chars as CharId)
+            .filter(|&c| !is_void(c) && !spared.contains(&c))
+            .collect();
+
+        let ctx = SearchContext {
+            corpus: &corpus,
+            weights: &weights,
+            pairs: &pairs,
+            l1_only: &l1_only,
+        };
+        let failed = promote_l1_only_chars(&mut layout, &ctx, kp);
+
+        assert!(
+            !failed.is_empty(),
+            "前提: L1 を使い切って引き上げ失敗が出る設定であること"
+        );
+        for &c in &YOON_SHIFT_IDS {
+            assert!(
+                layout.is_l1(c),
+                "ゃゅょ の CharId {c} が L1 に上がっていない（優先されていない）"
+            );
+        }
+    }
+
+    /// 極端な比を書かれてもテニュア確保でパニックしないこと。
+    /// `as usize` は無限大を usize::MAX、NaN を 0 に飽和させるので、
+    /// そのまま Vec::with_capacity に渡すと capacity overflow で落ちる。
+    #[test]
+    fn absurd_ratios_cannot_blow_up_the_tabu_capacity() {
+        for ratio in [1e20, f64::INFINITY, f64::MAX] {
+            let t = tenure_from_ratio(ratio, 200);
+            assert!(t <= NUM_PAIRS, "ratio={ratio} → {t} が全ペア数を超えた");
+        }
+        // 比として意味を持たない値はタブーを無効化する（0手）
+        assert_eq!(tenure_from_ratio(f64::NAN, 200), 0);
+        assert_eq!(tenure_from_ratio(f64::NEG_INFINITY, 200), 0);
+
+        // TabuSet の構築まで通しても落ちないこと
+        let config = SearchConfig {
+            tabu_ratio: [1e20; NUM_OP_KINDS],
+            ..SearchConfig::default()
+        };
+        let tabu = TabuSet::new(config.tabu_ratio, [200; NUM_OP_KINDS], 1, &config);
+        for kind in OpKind::ALL {
+            assert!(tabu.cur[kind as usize] <= NUM_PAIRS);
+        }
     }
 
     #[test]
