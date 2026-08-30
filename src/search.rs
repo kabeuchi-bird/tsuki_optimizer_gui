@@ -79,31 +79,17 @@ fn yoon_pair_count(k: usize, n: usize) -> usize {
     pair_count(k) + k * (n - k)
 }
 
-/// 各操作種別の近傍サイズ（1反復で生成しうる候補手の数）。
+/// 各操作種別の近傍サイズ（その反復で実際に生成された候補手の数）。
 ///
-/// 候補生成器は「全ペア数がサンプリング上限以下なら全列挙、超えるなら上限まで
-/// サンプリング」という規則なので、近傍サイズは両者の小さい方になる。テニュアは
-/// この値への比で指定するため、生成側と同じ式をここで共有する。
-///
-/// L1/L2 の文字数は探索中に変化しないので、開始時に一度求めれば足りる。これは
-/// 層間スワップが1対1交換であることに加え、候補生成・撹乱の双方が void と固定文字を
-/// 両側から除外していることに依る（`generate_inter_layer_candidates` /
-/// `random_perturbation`）。他モジュール側の性質に頼る不変条件なので、ループ内で
-/// `debug_assert` して崩れたら気づけるようにしてある。
-fn neighborhood_sizes(
-    kp: &KeyboardParams,
-    l1_free: usize,
-    l2_free: usize,
-    config: &SearchConfig,
-) -> [usize; NUM_OP_KINDS] {
-    let ab = config.ab_sample_limit;
+/// 生成規則（全ペア数とサンプリング上限の小さい方）を式で写し取ると、生成器が
+/// 実際には落としているペア——無操作ペア（`skip_inert_pair`）と制約違反
+/// （`swap_would_violate`）、サンプリングの試行打ち切り——が反映されず、
+/// 上振れした値になる。テニュアの意味は「選べる手のうち何割を禁止するか」なので、
+/// 分母は生成器が本当に並べた手数でなければならない。よって数える。
+fn count_by_kind(candidates: &[Candidate]) -> [usize; NUM_OP_KINDS] {
     let mut sizes = [0usize; NUM_OP_KINDS];
-    sizes[OpKind::SwapL1 as usize] = pair_count(l1_free).min(ab);
-    sizes[OpKind::SwapL2 as usize] = pair_count(l2_free).min(ab);
-    sizes[OpKind::InterLayer as usize] = config.inter_sample;
-    if kp.yoon {
-        let k = kp.num_consonants as usize;
-        sizes[OpKind::SwapYoon as usize] = yoon_pair_count(k, kp.yoon_char_count()).min(ab);
+    for c in candidates {
+        sizes[c.kind as usize] += 1;
     }
     sizes
 }
@@ -690,20 +676,11 @@ pub fn run(
     let mut l1_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
     let mut l2_free: Vec<CharId> = Vec::with_capacity(current.kp.num_chars);
 
-    // 近傍サイズはテニュアの基準になるので、ループに入る前に一度だけ求める。
-    // 層間スワップは1対1交換で L1/L2 の文字数を変えないため、この値は探索中不変。
-    collect_l1_free_chars_into(&current, &mut l1_free);
-    collect_l2_chars_into(&current, &mut l2_free);
-    let neighborhood = neighborhood_sizes(&current.kp, l1_free.len(), l2_free.len(), config);
     let active = active_op_kinds(&current.kp);
-    let mut tabu = TabuSet::new(config.tabu_ratio, neighborhood, grow_period, config);
-    // テニュアは比指定なので、実際に何手を禁止することになったかを一度だけ出す
-    let _ = writeln!(
-        out,
-        " 近傍サイズ     {}\n テニュア(実手数) {}",
-        summarize_by_kind(&neighborhood, active),
-        tabu.tenure_summary(active)
-    );
+    // テニュアは近傍サイズ比なので、最初の反復で候補を数えるまで確定できない。
+    // それまでは容量0で置いておく——1反復目のタブーリストはどのみち空なので、
+    // 判定結果は本来のテニュアで作った場合と変わらない。
+    let mut tabu = TabuSet::new(config.tabu_ratio, [0; NUM_OP_KINDS], grow_period, config);
     // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
     let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
     // 実際に使われる CharId の上限（キャッシュ無効化の走査範囲）
@@ -722,12 +699,6 @@ pub fn run(
         candidates.clear();
 
         collect_l1_free_chars_into(&current, &mut l1_free);
-        // 近傍サイズを開始時に一度しか求めない前提（層をまたぐ交換が1対1で、
-        // void と固定文字が両側から除外されていること）が崩れていないか確かめる
-        debug_assert_eq!(
-            pair_count(l1_free.len()).min(config.ab_sample_limit),
-            neighborhood[OpKind::SwapL1 as usize]
-        );
         generate_swap_candidates(
             &current,
             ctx,
@@ -741,10 +712,6 @@ pub fn run(
         );
 
         collect_l2_chars_into(&current, &mut l2_free);
-        debug_assert_eq!(
-            pair_count(l2_free.len()).min(config.ab_sample_limit),
-            neighborhood[OpKind::SwapL2 as usize]
-        );
         generate_swap_candidates(
             &current,
             ctx,
@@ -784,6 +751,19 @@ pub fn run(
 
         if candidates.is_empty() {
             break;
+        }
+
+        // 実際に並んだ候補数からテニュアを確定する（1反復目のみ）。
+        // この時点でタブーリストは空なので、ここで作り直しても情報は失われない。
+        if iter == 1 {
+            let neighborhood = count_by_kind(&candidates);
+            tabu = TabuSet::new(config.tabu_ratio, neighborhood, grow_period, config);
+            let _ = writeln!(
+                out,
+                " 近傍サイズ(実測) {}\n テニュア(実手数) {}",
+                summarize_by_kind(&neighborhood, active),
+                tabu.tenure_summary(active)
+            );
         }
 
         // O(n) で最良候補を選択（ソート不要）
@@ -1934,79 +1914,94 @@ mod tests {
         assert_eq!(tenure_from_ratio(0.01, 10), 1);
     }
 
-    /// 近傍サイズが候補生成器の実際の生成数と一致すること。
-    /// テニュアの意味（近傍の何割を禁止するか）はこの一致に乗っているので、
-    /// 式を写して比べるのではなく生成器を実際に走らせて数える。
-    #[test]
-    fn neighborhood_size_matches_what_the_generator_produces() {
-        let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(KeyboardParams::k3x10());
+    /// 拗音面の候補を生成し、実際に並んだ数と生成規則の式を返す。
+    fn measure_yoon_neighborhood(corpus_text: &str) -> (usize, usize) {
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        let kp = KeyboardParams::k3x10()
+            .with_yoon(table.registry_mask())
+            .unwrap();
+        let corpus = Corpus::from_str_with_yoon(corpus_text, Some(&table));
+        let weights = Weights {
+            kp,
+            ..Default::default()
+        };
         let ctx = SearchContext {
             corpus: &corpus,
             weights: &weights,
-            l1_only: &l1_only,
-            pairs: &pairs,
+            l1_only: &HashSet::new(),
+            pairs: &[],
         };
-        let layout = Layout::initial(KeyboardParams::k3x10());
+        let layout = Layout::initial(kp);
+        let yoon_chars: Vec<CharId> = kp.yoon_char_range().map(|c| c as CharId).collect();
         let mut rng = StdRng::seed_from_u64(1);
         let mut buf = DeltaScoreBuffer::new(corpus.bigrams.len(), corpus.trigrams.len());
         let mut cache = DeltaPairCache::new();
 
-        // 全列挙になるよう十分大きい上限を与えれば、生成数＝近傍サイズになる
-        let config = SearchConfig {
-            ab_sample_limit: usize::MAX / 4,
-            ..SearchConfig::default()
-        };
-        let mut l2 = Vec::new();
-        collect_l2_chars_into(&layout, &mut l2);
-        let mut out = Vec::new();
-        generate_swap_candidates(
+        let mut candidates = Vec::new();
+        generate_yoon_candidates(
             &layout,
             &ctx,
-            &l2,
-            OpKind::SwapL2,
-            config.ab_sample_limit,
+            &yoon_chars,
+            usize::MAX / 4, // 全列挙させる
             &mut rng,
-            &mut out,
+            &mut candidates,
             &mut buf,
             &mut cache,
         );
 
-        let mut l1 = Vec::new();
-        collect_l1_free_chars_into(&layout, &mut l1);
-        let sizes = neighborhood_sizes(&layout.kp, l1.len(), l2.len(), &config);
-        assert_eq!(sizes[OpKind::SwapL2 as usize], out.len());
+        let measured = count_by_kind(&candidates)[OpKind::SwapYoon as usize];
+        assert_eq!(measured, candidates.len());
+        let formula = yoon_pair_count(kp.num_consonants as usize, kp.yoon_char_count());
+        (measured, formula)
+    }
+
+    /// 近傍サイズが「生成規則の式」ではなく「実際に並んだ候補数」であること。
+    ///
+    /// 式は上界でしかない。生成器は無操作ペア（両端ともコーパス頻度0）を落とすので、
+    /// コーパスに出てこない子音があるとその分だけ実測が下回る。テニュアの分母は
+    /// この実測でなければ「近傍の何割を禁止するか」という意味が保てない。
+    #[test]
+    fn measured_neighborhood_drops_the_pairs_the_generator_skips() {
+        // 全子音が出てくるコーパスでは落ちるペアが無く、式と一致する（上界が密）
+        let (dense, formula) = measure_yoon_neighborhood(YOON_CORPUS);
+        assert_eq!(dense, formula);
+
+        // Ky しか出てこないコーパスでは、残りの子音を含むペアが無操作として落ちる
+        let (sparse, formula_sparse) = measure_yoon_neighborhood("きゃきゅきょきゃ");
+        assert_eq!(formula, formula_sparse, "式はコーパスに依存しない");
+        assert!(
+            sparse < dense,
+            "落とされたペアが反映されていない: 疎={sparse} 密={dense}"
+        );
+        assert!(sparse > 0, "候補が全部落ちてしまっている");
     }
 
     #[test]
-    fn neighborhood_is_capped_by_the_sampling_limit() {
-        let config = SearchConfig::default();
-        let kp = KeyboardParams::k3x10();
-        // 全ペア数が上限を超える側では、近傍サイズは上限そのもの
-        let big = neighborhood_sizes(&kp, 30, 30, &config);
-        assert_eq!(big[OpKind::SwapL2 as usize], config.ab_sample_limit);
-        // 下回る側では全ペア数
-        let small = neighborhood_sizes(&kp, 5, 5, &config);
-        assert_eq!(small[OpKind::SwapL2 as usize], pair_count(5));
-        // 層間はサンプリング数そのもの、拗音面は none では存在しない
-        assert_eq!(big[OpKind::InterLayer as usize], config.inter_sample);
-        assert_eq!(big[OpKind::SwapYoon as usize], 0);
-        // 拗音面は「少なくとも一方が子音」なので単純な組み合わせ数にはならない
-        assert_eq!(yoon_pair_count(3, 5), 3 + 3 * 2);
-        assert_eq!(yoon_pair_count(0, 5), 0);
-        assert_eq!(yoon_pair_count(3, 1), 0);
+    fn count_by_kind_tallies_each_operator_separately() {
+        let c = |kind| Candidate { kind, c1: 0, c2: 1, delta: 0.0 };
+        let candidates = vec![
+            c(OpKind::SwapL2),
+            c(OpKind::SwapL1),
+            c(OpKind::SwapL2),
+            c(OpKind::InterLayer),
+        ];
+        let sizes = count_by_kind(&candidates);
+        assert_eq!(sizes[OpKind::SwapL1 as usize], 1);
+        assert_eq!(sizes[OpKind::SwapL2 as usize], 2);
+        assert_eq!(sizes[OpKind::InterLayer as usize], 1);
+        assert_eq!(sizes[OpKind::SwapYoon as usize], 0);
+        assert_eq!(count_by_kind(&[]), [0; NUM_OP_KINDS]);
     }
 
     #[test]
-    fn tenure_scales_with_the_sampling_limit() {
-        // 比で指定する狙いは「上限を変えても禁止する割合が保たれる」こと
-        let kp = KeyboardParams::k3x10();
-        let mut cfg = SearchConfig::default();
-        let ratio = cfg.tabu_ratio[OpKind::SwapL2 as usize];
-        cfg.ab_sample_limit = 200;
-        let small = tenure_from_ratio(ratio, neighborhood_sizes(&kp, 40, 40, &cfg)[1]);
-        cfg.ab_sample_limit = 400;
-        let large = tenure_from_ratio(ratio, neighborhood_sizes(&kp, 40, 40, &cfg)[1]);
-        assert_eq!(small * 2, large, "上限を倍にしたらテニュアも倍になるべき");
+    fn tenure_scales_with_the_neighborhood() {
+        // 比で指定する狙いは「近傍が変わっても禁止する割合が保たれる」こと
+        let ratio = SearchConfig::default().tabu_ratio[OpKind::SwapL2 as usize];
+        assert_eq!(
+            tenure_from_ratio(ratio, 200) * 2,
+            tenure_from_ratio(ratio, 400),
+            "近傍が倍ならテニュアも倍になるべき"
+        );
     }
 
     #[test]
