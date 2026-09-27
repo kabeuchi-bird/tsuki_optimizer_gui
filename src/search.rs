@@ -1383,20 +1383,19 @@ fn warn_unpromoted(failed: Vec<CharId>, out: &mut impl Write) {
 
 /// hybrid: 拗音面（第3層）を構築する。
 ///
-/// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
-/// 2. 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
-///    以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
+/// 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
+/// 以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
 ///
+/// 前提: ゃゅょ は呼び出し前に L1 にあること（禁止位置の判定に L1 の位置を使う）。
 /// mode=none では呼ばれない（呼び出し側で kp.yoon を確認する）。
 fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams) {
     let npl = kp.num_slots_per_layer as usize;
     let unigrams = &ctx.corpus.unigrams;
 
-    // 1. ゃゅょ の L1 への引き上げは promote_l1_only_chars が担う
-    //    （hybrid では YoonSetup::extend_l1_only が ゃゅょ を l1_only に入れている）。
-    //    ここに来た時点で L1 にいることを前提に、以降で禁止スロットを判定する。
+    // ゃゅょ の L1 への引き上げは呼び出し側が済ませている
+    // （2-263 / random は promote_l1_only_chars、user-defined は promote_yoon_shift_keys）。
 
-    // 2. 子音を配置できる拗音面 physical（禁止位置を除く）
+    // 子音を配置できる拗音面 physical（禁止位置を除く）
     let mut avail: Vec<usize> = (0..npl)
         .filter(|&p| !yoon_physical_forbidden(layout, p as SlotId))
         .collect();
@@ -1605,7 +1604,8 @@ fn build_initial_user_defined(
 
 /// hybrid のユーザー定義配列で L2 にある ゃゅょ を L1 へ引き上げ、入れ替えを警告する。
 ///
-/// 引き上げられなかった分は後続の制約検査がランダム配字へフォールバックさせる。
+/// 引き上げられなかった分は警告したうえで、後続の制約検査がランダム配字へ
+/// フォールバックさせる。
 fn promote_yoon_shift_keys(
     layout: &mut Layout,
     ctx: &SearchContext,
@@ -1626,6 +1626,7 @@ fn promote_yoon_shift_keys(
             CHAR_LIST[up as usize], CHAR_LIST[down as usize], CHAR_LIST[down as usize]
         );
     }
+    warn_unpromoted(result.failed, out);
 }
 
 /// ランダム配字：制約を守りつつ全文字をランダムにシャッフル
@@ -2119,15 +2120,12 @@ mod tests {
         }
     }
 
-    /// hybrid でも user-defined 初期配列が使われること。
-    ///
-    /// 同梱の initial_layout.toml は ゃゅ を L2 に置いているので、以前は l1_only 制約に
-    /// はじかれてランダム配字へ落ちていた。ゃゅょ だけは引き上げて続行し、
-    /// それ以外はユーザーの書いた配置が残り、拗音面は自動配置されること。
+    /// hybrid でも user-defined 初期配列が使われること。同梱の initial_layout.toml は
+    /// ゃゅ を L2 に置いているので、ゃゅょ だけ引き上げ、それ以外はユーザーの書いた配置が
+    /// 残り、拗音面は自動配置されること。
     #[test]
     fn user_defined_layout_works_in_hybrid_mode() {
-        use crate::chars::{build_char_to_id, YOON_SHIFT_IDS};
-        use crate::layout::physical_of;
+        use crate::chars::build_char_to_id;
         let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
         for size in [
             KeyboardParams::k3x10(),
@@ -2152,17 +2150,7 @@ mod tests {
             assert!(log.contains("入れ替えました"), "ゃゅ の引き上げが記録されていない: {log}");
             // 引き上げと無関係な文字はユーザー定義の位置のまま（先頭スロットの「そ」）
             assert_eq!(layout.char_to_slot[build_char_to_id()[&'そ'] as usize], 0);
-            for &c in &YOON_SHIFT_IDS {
-                assert!(layout.is_l1(c), "ゃゅょ(CharId {c}) が L1 にいない");
-            }
-            // 拗音面: 全子音が第3層にあり、シフトキーや ゃゅょ と同じ物理キーに乗っていない
-            let npl = kp.num_slots_per_layer as usize;
-            for c in kp.yoon_char_range().take(kp.num_consonants as usize) {
-                let slot = layout.char_to_slot[c];
-                assert!((slot as usize) >= 2 * npl, "子音 {c} が拗音面にいない");
-                let p = physical_of(slot, kp);
-                assert!(!yoon_physical_forbidden(&layout, p), "子音 {c} が禁止位置 {p} にいる");
-            }
+            assert_valid_hybrid(&layout);
         }
     }
 
