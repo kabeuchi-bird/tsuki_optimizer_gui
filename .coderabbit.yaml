@@ -17,7 +17,7 @@ reviews:
       instructions: |
         タブーサーチの探索ループです。パフォーマンスが最重要です。
         - ループ内のヒープアロケーション（Vec::new, collect, format! 等）を指摘してください
-        - u64 ビットマスク演算の正しさを確認してください（MAX_CHARS=64 前提）
+        - ビットセット・u128 dirty mask 演算の正しさを確認してください（MAX_CHARS=97、上限128）
         - DeltaPairCache の無効化漏れ（dirty mask の計算ミス）がないか確認してください
     - path: "src/cost.rs"
       instructions: |

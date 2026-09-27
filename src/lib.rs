@@ -181,3 +181,89 @@ pub fn write_final_result(
         (initial_score - best_score) / initial_score.abs() * 100.0
     );
 }
+
+/// コーパスを読み込む。存在しない・読めない・認識可能な文字がない場合は Err（CLI / GUI 共通）
+pub fn load_corpus(path: &str, table: Option<&yoon::YoonTable>) -> Result<corpus::Corpus, String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err(format!("コーパスファイルが見つかりません: {path}"));
+    }
+    let c = corpus::Corpus::from_file_with_yoon(p, table)
+        .map_err(|e| format!("コーパスファイルを読み込めません ({path}): {e}"))?;
+    if c.is_empty() {
+        return Err(format!("コーパスに認識可能な文字が含まれていません: {path}"));
+    }
+    Ok(c)
+}
+
+/// ログファイルを親ディレクトリごと作成する（CLI / GUI 共通）
+pub fn create_log_file(path: &str) -> Result<std::fs::File, String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("ログディレクトリを作成できません ({}): {e}", parent.display())
+        })?;
+    }
+    std::fs::File::create(path).map_err(|e| format!("ログファイルを作成できません ({path}): {e}"))
+}
+
+/// 探索1回分の入力（CLI / GUI 共通）
+pub struct Run {
+    pub toml_config: config::Config,
+    pub yoon: yoon::YoonSetup,
+    pub search_config: search::SearchConfig,
+    pub weights: cost::Weights,
+    pub exclusive_pairs: Vec<layout::ExclusivePair>,
+    pub corpus: corpus::Corpus,
+    pub corpus_path: String,
+    pub seed: u64,
+}
+
+impl Run {
+    /// 設定検証 → 初期解生成 → タブーサーチ → 結果出力を、すべて `out` に書きながら実行する
+    pub fn execute(
+        &self,
+        out: &mut impl Write,
+        stop_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        report_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        on_update: &mut impl FnMut(&search::SearchUpdate),
+    ) {
+        use rand::SeedableRng;
+
+        let kp = self.yoon.kp;
+        write_corpus_stats(out, &self.corpus.stats);
+        self.toml_config.validate(out);
+        self.search_config.validate(out);
+        write_config_summary(
+            out,
+            &kp,
+            &self.corpus_path,
+            self.seed,
+            &self.search_config,
+            &self.weights,
+            &self.toml_config,
+            &self.exclusive_pairs,
+        );
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(self.seed);
+        let mut l1_only = self.toml_config.build_l1_only_set();
+        // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）
+        self.yoon.extend_l1_only(&mut l1_only);
+        let ctx = search::SearchContext {
+            corpus: &self.corpus,
+            weights: &self.weights,
+            pairs: &self.exclusive_pairs,
+            l1_only: &l1_only,
+        };
+        let initial = search::build_initial_layout(
+            &ctx, kp, self.search_config.initial_layout_mode, &mut rng, out,
+        );
+        let initial_score = cost::score(&initial, &self.corpus, &self.weights);
+        write_initial_layout(out, &initial, &self.corpus, &self.weights);
+
+        let best = search::run(
+            initial, &ctx, &self.search_config, &mut rng, stop_flag, report_flag, on_update, out,
+        );
+        write_final_result(out, &best, &self.corpus, &self.weights, initial_score);
+        let _ = out.flush();
+    }
+}

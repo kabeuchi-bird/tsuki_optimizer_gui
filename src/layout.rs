@@ -518,12 +518,6 @@ impl Layout {
         self.kp.yoon && self.layer_of_char(c) == Layer::Yoon
     }
 
-    /// 文字の「主手」（Layer 2なら文字キー側の手）
-    #[inline]
-    pub fn primary_hand(&self, c: CharId) -> Hand {
-        slot_hand(self.char_to_slot[c as usize], self.kp.num_cols)
-    }
-
     /// 実打鍵数を返す
     /// 3x10: 。/、は K/D + Enter で 2打鍵
     /// 3x10_single_shift: 、は E（シフトキー）+ Enter で 2打鍵（。は通常文字扱い）

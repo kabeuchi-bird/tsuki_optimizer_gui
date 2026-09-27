@@ -1276,19 +1276,6 @@ pub fn build_initial_layout(
     rng: &mut impl Rng,
     out: &mut impl Write,
 ) -> Layout {
-    // hybrid 未対応の初期配列モードはここで差し替える。
-    // （どのモードが拗音面に対応しているかを dispatch の直前に集約し、
-    //   下のログが「実際に使われたモード」を表示するようにする）
-    let mode = if kp.yoon && mode == InitialLayoutMode::UserDefined {
-        let _ = writeln!(
-            out,
-            "注意: user-defined 初期配列は hybrid 拗音面に未対応です → 2-263 を使用します"
-        );
-        InitialLayoutMode::Tsuki2_263
-    } else {
-        mode
-    };
-
     let layout = match mode {
         InitialLayoutMode::Tsuki2_263 => build_initial_2_263(ctx, kp, out),
         InitialLayoutMode::Random => build_initial_random(ctx, kp, rng, out),
@@ -1326,12 +1313,30 @@ fn promote_l1_only_chars(
     ctx: &SearchContext,
     kp: KeyboardParams,
 ) -> Vec<CharId> {
-    let unigrams = &ctx.corpus.unigrams;
-    // 頻度の低い文字から引き上げると、交換相手（L1 の最低頻度文字）を先に消費して
-    // しまうため、頻度の高い文字から順に処理する
-    let mut pending: Vec<CharId> = (0..kp.num_chars as CharId)
+    let pending: Vec<CharId> = (0..kp.num_chars as CharId)
         .filter(|&c| ctx.l1_only.contains(&c) && !is_void(c) && !layout.is_l1(c))
         .collect();
+    promote_chars_to_l1(layout, ctx, kp, pending).failed
+}
+
+/// `promote_chars_to_l1` の結果
+struct Promotion {
+    /// (引き上げた文字, 代わりに L2 へ下ろした文字)
+    swaps: Vec<(CharId, CharId)>,
+    /// 交換相手が尽きて引き上げられなかった文字
+    failed: Vec<CharId>,
+}
+
+/// 指定した L2 の文字を、L1 の最低頻度の可動文字と入れ替えて Layer 1 へ引き上げる。
+fn promote_chars_to_l1(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    mut pending: Vec<CharId>,
+) -> Promotion {
+    let unigrams = &ctx.corpus.unigrams;
+    // 頻度の低い文字から引き上げると、交換相手（L1 の最低頻度文字）を先に消費して
+    // しまうため、頻度の高い文字から順に処理する。
     // hybrid では ゃゅょ が L1 にいることが方式の前提になっている（setup_yoon_face は
     // L1 の物理位置を見て子音の禁止位置を決めるので、L2 に残ると子音と同じキーに
     // 同居しうる）。l1_only が多くて L1 の交換相手を使い切る設定でも取りこぼさないよう、
@@ -1343,7 +1348,7 @@ fn promote_l1_only_chars(
             .then_with(|| unigrams[b as usize].total_cmp(&unigrams[a as usize]))
     });
 
-    let mut failed = Vec::new();
+    let mut result = Promotion { swaps: Vec::new(), failed: Vec::new() };
     for c in pending {
         // 交換相手: L1 にいる可動文字のうち最低頻度のもの
         let target = (0..kp.num_chars as CharId)
@@ -1352,11 +1357,14 @@ fn promote_l1_only_chars(
             })
             .min_by(|&a, &b| unigrams[a as usize].total_cmp(&unigrams[b as usize]));
         match target {
-            Some(t) => layout.swap_chars(c, t),
-            None => failed.push(c),
+            Some(t) => {
+                layout.swap_chars(c, t);
+                result.swaps.push((c, t));
+            }
+            None => result.failed.push(c),
         }
     }
-    failed
+    result
 }
 
 /// `promote_l1_only_chars` が引き上げられなかった文字を警告する。
@@ -1375,20 +1383,19 @@ fn warn_unpromoted(failed: Vec<CharId>, out: &mut impl Write) {
 
 /// hybrid: 拗音面（第3層）を構築する。
 ///
-/// 1. ゃゅょ を L1 へ移動する（L2 にある場合、最低頻度の可動L1基底文字と交換）。
-/// 2. 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
-///    以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
+/// 拗音面の各物理位置に子音/void を配置する。子音は「シフトキー位置」「ゃゅょ物理位置」
+/// 以外の使用可能スロットへ、頻度降順 × 難易度昇順で決定的に割り当てる。残りは void。
 ///
+/// 前提: ゃゅょ は呼び出し前に L1 にあること（禁止位置の判定に L1 の位置を使う）。
 /// mode=none では呼ばれない（呼び出し側で kp.yoon を確認する）。
 fn setup_yoon_face(layout: &mut Layout, ctx: &SearchContext, kp: KeyboardParams) {
     let npl = kp.num_slots_per_layer as usize;
     let unigrams = &ctx.corpus.unigrams;
 
-    // 1. ゃゅょ の L1 への引き上げは promote_l1_only_chars が担う
-    //    （hybrid では YoonSetup::extend_l1_only が ゃゅょ を l1_only に入れている）。
-    //    ここに来た時点で L1 にいることを前提に、以降で禁止スロットを判定する。
+    // ゃゅょ の L1 への引き上げは呼び出し側が済ませている
+    // （2-263 / random は promote_l1_only_chars、user-defined は promote_yoon_shift_keys）。
 
-    // 2. 子音を配置できる拗音面 physical（禁止位置を除く）
+    // 子音を配置できる拗音面 physical（禁止位置を除く）
     let mut avail: Vec<usize> = (0..npl)
         .filter(|&p| !yoon_physical_forbidden(layout, p as SlotId))
         .collect();
@@ -1561,6 +1568,12 @@ fn build_initial_user_defined(
 
     match parse_user_layout(kp, def) {
         Ok(mut layout) => {
+            // hybrid では ゃゅょ を L1 に置くのが方式の前提。通常の配列は ゃゅ を L2 に
+            // 置くことが多く、そのままでは下の制約検査で毎回はじかれてしまうので、
+            // ここだけは拒否せず引き上げ、何を動かしたかを警告に残す。
+            if kp.yoon {
+                promote_yoon_shift_keys(&mut layout, ctx, kp, out);
+            }
             let violates_layer_constraints = (0..kp.num_chars as CharId).any(|c| {
                 (is_fixed(c, kp) || ctx.l1_only.contains(&c)) && !layout.is_l1(c)
             });
@@ -1572,6 +1585,10 @@ fn build_initial_user_defined(
                 return build_initial_random(ctx, kp, rng, out);
             }
             fix_exclusive_pair_violations(&mut layout, ctx, kp, out);
+            if kp.yoon {
+                // 拗音面は initial_layout.toml では指定しないので、他のモードと同じく自動配置
+                setup_yoon_face(&mut layout, ctx, kp);
+            }
             layout
         }
         Err(e) => {
@@ -1583,6 +1600,33 @@ fn build_initial_user_defined(
             build_initial_random(ctx, kp, rng, out)
         }
     }
+}
+
+/// hybrid のユーザー定義配列で L2 にある ゃゅょ を L1 へ引き上げ、入れ替えを警告する。
+///
+/// 引き上げられなかった分は警告したうえで、後続の制約検査がランダム配字へ
+/// フォールバックさせる。
+fn promote_yoon_shift_keys(
+    layout: &mut Layout,
+    ctx: &SearchContext,
+    kp: KeyboardParams,
+    out: &mut impl Write,
+) {
+    use crate::chars::{CHAR_LIST, YOON_SHIFT_IDS};
+    let pending: Vec<CharId> = YOON_SHIFT_IDS
+        .iter()
+        .copied()
+        .filter(|&c| !layout.is_l1(c))
+        .collect();
+    let result = promote_chars_to_l1(layout, ctx, kp, pending);
+    for (up, down) in result.swaps {
+        let _ = writeln!(
+            out,
+            "注意: hybrid では ゃゅょ を Layer 1 に置く必要があるため、ユーザー定義配列の '{}' と '{}' を入れ替えました（'{}' → L2）",
+            CHAR_LIST[up as usize], CHAR_LIST[down as usize], CHAR_LIST[down as usize]
+        );
+    }
+    warn_unpromoted(result.failed, out);
 }
 
 /// ランダム配字：制約を守りつつ全文字をランダムにシャッフル
@@ -2073,6 +2117,40 @@ mod tests {
                 layout.is_l1(c),
                 "ゃゅょ の CharId {c} が L1 に上がっていない（優先されていない）"
             );
+        }
+    }
+
+    /// hybrid でも user-defined 初期配列が使われること。同梱の initial_layout.toml は
+    /// ゃゅ を L2 に置いているので、ゃゅょ だけ引き上げ、それ以外はユーザーの書いた配置が
+    /// 残り、拗音面は自動配置されること。
+    #[test]
+    fn user_defined_layout_works_in_hybrid_mode() {
+        use crate::chars::build_char_to_id;
+        let table = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
+        for size in [
+            KeyboardParams::k3x10(),
+            KeyboardParams::k3x10_single_shift(),
+            KeyboardParams::k3x11(),
+        ] {
+            let kp = size.with_yoon(table.registry_mask()).unwrap();
+            let (corpus, weights, l1_only, pairs) = hybrid_ctx_fixtures(kp);
+            let ctx = SearchContext {
+                corpus: &corpus,
+                weights: &weights,
+                l1_only: &l1_only,
+                pairs: &pairs,
+            };
+            let mut rng = SmallRng::seed_from_u64(1);
+            let mut log = Vec::new();
+            let layout =
+                build_initial_layout(&ctx, kp, InitialLayoutMode::UserDefined, &mut rng, &mut log);
+            let log = String::from_utf8(log).unwrap();
+
+            assert!(!log.contains("フォールバック"), "{log}");
+            assert!(log.contains("入れ替えました"), "ゃゅ の引き上げが記録されていない: {log}");
+            // 引き上げと無関係な文字はユーザー定義の位置のまま（先頭スロットの「そ」）
+            assert_eq!(layout.char_to_slot[build_char_to_id()[&'そ'] as usize], 0);
+            assert_valid_hybrid(&layout);
         }
     }
 

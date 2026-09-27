@@ -130,10 +130,7 @@ impl Config {
 
     /// yoon.mode 設定から YoonMode を生成する（未指定は None）
     pub fn build_yoon_mode(&self) -> YoonMode {
-        match self.yoon.mode.as_deref() {
-            Some(s) => YoonMode::from_config_str(s),
-            None => YoonMode::None,
-        }
+        self.yoon.mode.as_deref().map_or(YoonMode::None, YoonMode::from_config_str)
     }
 
     /// 設定ファイル固有の検証（`SearchConfig::validate` と同じ出力先へ書く）。
@@ -188,10 +185,10 @@ impl Config {
     }
 
     pub fn build_initial_layout_mode(&self) -> InitialLayoutMode {
-        match self.run.initial_layout.as_deref() {
-            Some(s) => InitialLayoutMode::from_config_str(s),
-            None => InitialLayoutMode::default(),
-        }
+        self.run
+            .initial_layout
+            .as_deref()
+            .map_or_else(InitialLayoutMode::default, InitialLayoutMode::from_config_str)
     }
 
     /// デフォルト値と設定ファイルの内容をマージして Weights を生成する
@@ -340,38 +337,29 @@ impl Config {
 
     /// プリセットに基づいて daku_l2_trigger 配列を生成する
     /// true の文字が L2 に配置されている状態で直後に゛が来ると -1打鍵のボーナスが入る
+    /// （゛は常にL1固定なのでトリガー対象から外す）
     pub fn build_daku_l2_trigger(&self) -> [bool; MAX_CHARS] {
-        let mut trigger = [false; MAX_CHARS];
-        // ゛は常にL1固定なのでトリガー対象から外す
-        let target_str = match self.constraints.preset.as_deref() {
-            Some("all-daku") => "うかきくけこさしすせそたちつてとはひふへほ",
-            Some("i-daku") => "きしちひ",
-            _ => return trigger,
-        };
-        let char_map = chars::build_char_to_id();
-        for c in target_str.chars() {
-            if let Some(&id) = char_map.get(&c) {
-                trigger[id as usize] = true;
-            }
-        }
-        trigger
+        self.preset_trigger("うかきくけこさしすせそたちつてとはひふへほ", "きしちひ")
     }
 
     /// プリセットに基づいて handaku_l2_trigger 配列を生成する
     /// true の文字が L2 に配置されている状態で直後に゜が来ると -1打鍵のボーナスが入る
     /// 対象はは行（は,ひ,ふ,へ,ほ）のみ
     pub fn build_handaku_l2_trigger(&self) -> [bool; MAX_CHARS] {
+        self.preset_trigger("はひふへほ", "ひ")
+    }
+
+    /// preset に応じて all_daku / i_daku の文字を true にした配列を返す（preset なしは全 false）
+    fn preset_trigger(&self, all_daku: &str, i_daku: &str) -> [bool; MAX_CHARS] {
         let mut trigger = [false; MAX_CHARS];
         let target_str = match self.constraints.preset.as_deref() {
-            Some("all-daku") => "はひふへほ",
-            Some("i-daku") => "ひ",
+            Some("all-daku") => all_daku,
+            Some("i-daku") => i_daku,
             _ => return trigger,
         };
         let char_map = chars::build_char_to_id();
-        for c in target_str.chars() {
-            if let Some(&id) = char_map.get(&c) {
-                trigger[id as usize] = true;
-            }
+        for id in target_str.chars().filter_map(|c| char_map.get(&c)) {
+            trigger[*id as usize] = true;
         }
         trigger
     }
