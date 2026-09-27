@@ -24,16 +24,12 @@
 //                           "none"（デフォルト）/ "hybrid"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tsuki_optimize::config::{keyboard_params_from_str, Config};
-use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::score;
 use tsuki_optimize::search;
 
 // ──────────────────────────────────────────────────────────────
@@ -190,100 +186,26 @@ fn main() {
     };
 
     // ── コーパス読み込み ─────────────────────────
-    let corpus_file = Path::new(&corpus_path);
-    if !corpus_file.exists() {
-        eprintln!(
-            "エラー: コーパスファイルが見つかりません: {}",
-            corpus_path
-        );
+    let corpus = tsuki_optimize::load_corpus(&corpus_path, yoon.table.as_ref()).unwrap_or_else(|e| {
+        eprintln!("エラー: {e}");
         std::process::exit(1);
-    }
-    let corpus = match Corpus::from_file_with_yoon(corpus_file, yoon.table.as_ref()) {
-        Ok(c) => {
-            eprintln!("コーパス: {}", corpus_file.display());
-            c
-        }
-        Err(e) => {
-            eprintln!("エラー: コーパス読み込み失敗: {}", e);
-            std::process::exit(1);
-        }
-    };
-    if corpus.is_empty() {
-        eprintln!("エラー: コーパスに認識可能な文字が含まれていません: {}", corpus_path);
-        std::process::exit(1);
-    }
+    });
+    eprintln!("コーパス: {corpus_path}");
 
-    // ── シグナルハンドラ登録用のフラグを先に準備 ──
     let stop_flag = Arc::new(AtomicBool::new(false));
     let report_flag = Arc::new(AtomicBool::new(false));
 
     // ── ログファイル作成 + TeeWriter ─────────────
-    let log_path = cli.get("--log").cloned().unwrap_or_else(|| {
-        let ts = tsuki_optimize::local_timestamp();
-        format!("log/{}.log", ts)
+    let log_path = cli
+        .get("--log")
+        .cloned()
+        .unwrap_or_else(|| format!("log/{}.log", tsuki_optimize::local_timestamp()));
+    let log_file = tsuki_optimize::create_log_file(&log_path).unwrap_or_else(|e| {
+        eprintln!("エラー: {e}");
+        std::process::exit(1);
     });
-
-    if let Some(parent) = Path::new(&log_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "エラー: ログディレクトリを作成できません ({}): {}",
-                    parent.display(),
-                    e
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    let log_file = match File::create(&log_path) {
-        Ok(f) => {
-            eprintln!("ログファイル: {}", log_path);
-            f
-        }
-        Err(e) => {
-            eprintln!(
-                "エラー: ログファイルを作成できません ({log_path}): {e}"
-            );
-            std::process::exit(1);
-        }
-    };
-
+    eprintln!("ログファイル: {log_path}");
     let mut out = TeeWriter::new(log_file, Arc::clone(&stop_flag));
-
-    // ── コーパス統計表示 ──────────────────────────
-    tsuki_optimize::write_corpus_stats(&mut out, &corpus.stats);
-
-    // ── 設定検証 ────────────────────────────────
-    toml_config.validate(&mut out);
-    search_config.validate(&mut out);
-
-    // ── 設定サマリ表示 ───────────────────────────
-    tsuki_optimize::write_config_summary(
-        &mut out,
-        &kp,
-        &corpus_path,
-        seed,
-        &search_config,
-        &weights,
-        &toml_config,
-        &exclusive_pairs,
-    );
-
-    // ── 初期解生成 ───────────────────────────────
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let mut l1_only = toml_config.build_l1_only_set();
-    yoon.extend_l1_only(&mut l1_only);
-    let ctx = search::SearchContext {
-        corpus: &corpus,
-        weights: &weights,
-        pairs: &exclusive_pairs,
-        l1_only: &l1_only,
-    };
-    let initial_layout = search::build_initial_layout(
-        &ctx, kp, search_config.initial_layout_mode, &mut rng, &mut out,
-    );
-    let initial_score = score(&initial_layout, &corpus, &weights);
-    tsuki_optimize::write_initial_layout(&mut out, &initial_layout, &corpus, &weights);
 
     // ── シグナルハンドラ登録 ─────────────────────
     #[cfg(unix)]
@@ -295,21 +217,18 @@ fn main() {
             .expect("SIGUSR1ハンドラの登録に失敗しました");
     }
 
-    // ── タブーサーチ ─────────────────────────────
-    let best_layout = search::run(
-        initial_layout,
-        &ctx,
-        &search_config,
-        &mut rng,
-        &stop_flag,
-        &report_flag,
-        &mut |_| {},
-        &mut out,
-    );
-
-    // ── 結果表示 ─────────────────────────────────
-    tsuki_optimize::write_final_result(&mut out, &best_layout, &corpus, &weights, initial_score);
-    let _ = out.flush();
+    // ── 探索 ────────────────────────────────────
+    tsuki_optimize::Run {
+        toml_config,
+        yoon,
+        search_config,
+        weights,
+        exclusive_pairs,
+        corpus,
+        corpus_path,
+        seed,
+    }
+    .execute(&mut out, &stop_flag, &report_flag, &mut |_| {});
 
     // ── ログファイル書き込みエラーのチェック ──
     if let Some(err) = out.io_error.as_ref() {

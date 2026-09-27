@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -7,8 +6,8 @@ use std::sync::Arc;
 
 use tsuki_optimize::config::{keyboard_params_from_str, Config};
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{score, Weights};
-use tsuki_optimize::search::{self, SearchContext, SearchPhase, SearchUpdate};
+use tsuki_optimize::cost::Weights;
+use tsuki_optimize::search::{self, SearchPhase, SearchUpdate};
 use tsuki_optimize::yoon::{YoonMode, YoonSetup};
 
 use super::log_writer::{ColorData, ColorMode, GuiLogWriter};
@@ -220,28 +219,13 @@ impl App {
         };
 
         let corpus_path = self.corpus_path_str.clone();
-        if !Path::new(&corpus_path).exists() {
-            self.config_error = Some(format!(
-                "コーパスファイルが見つかりません: {corpus_path}"
-            ));
-            return;
-        }
-        let corpus = match Corpus::from_file_with_yoon(Path::new(&corpus_path), yoon.table.as_ref())
-        {
+        let corpus = match tsuki_optimize::load_corpus(&corpus_path, yoon.table.as_ref()) {
             Ok(c) => c,
             Err(e) => {
-                self.config_error = Some(format!(
-                    "コーパスファイルを読み込めません ({corpus_path}): {e}"
-                ));
+                self.config_error = Some(e);
                 return;
             }
         };
-        if corpus.is_empty() {
-            self.config_error = Some(format!(
-                "コーパスに認識可能な文字が含まれていません: {corpus_path}"
-            ));
-            return;
-        }
 
         // GUI側でスコア内訳計算用にコピーを保持
         self.corpus = Some(corpus.clone());
@@ -268,101 +252,38 @@ impl App {
 
         // ログファイル作成
         let log_path = format!("log/{}.log", tsuki_optimize::local_timestamp());
-        if let Some(parent) = Path::new(&log_path).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                self.config_error = Some(format!(
-                    "ログディレクトリを作成できません ({}): {}",
-                    parent.display(),
-                    e
-                ));
-                self.running = false;
-                return;
-            }
-        }
-        let log_file = match File::create(&log_path) {
+        let log_file = match tsuki_optimize::create_log_file(&log_path) {
             Ok(f) => BufWriter::new(f),
             Err(e) => {
-                self.config_error = Some(format!(
-                    "ログファイルを作成できません ({log_path}): {e}"
-                ));
+                self.config_error = Some(e);
                 self.running = false;
                 return;
             }
         };
 
         let stop_flag = Arc::clone(&self.stop_flag);
-        let writer_stop_flag = Arc::clone(&self.stop_flag);
+        let mut log_writer = GuiLogWriter {
+            tx: log_tx,
+            file: Some(log_file),
+            stop_flag: Arc::clone(&self.stop_flag),
+        };
+        let run = tsuki_optimize::Run {
+            toml_config,
+            yoon,
+            search_config,
+            weights,
+            exclusive_pairs,
+            corpus,
+            corpus_path,
+            seed,
+        };
 
         std::thread::spawn(move || {
-            use rand::rngs::SmallRng;
-            use rand::SeedableRng;
-
-            let mut log_writer = GuiLogWriter {
-                tx: log_tx,
-                file: Some(log_file),
-                stop_flag: writer_stop_flag,
-            };
-
-            let mut rng = SmallRng::seed_from_u64(seed);
-            let mut l1_only = toml_config.build_l1_only_set();
-            // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）
-            yoon.extend_l1_only(&mut l1_only);
-            let ctx = SearchContext {
-                corpus: &corpus,
-                weights: &weights,
-                pairs: &exclusive_pairs,
-                l1_only: &l1_only,
-            };
-
-            // コーパス統計出力
-            tsuki_optimize::write_corpus_stats(&mut log_writer, &corpus.stats);
-
-            // 設定検証
-            toml_config.validate(&mut log_writer);
-            search_config.validate(&mut log_writer);
-
-            // 設定サマリー出力
-            tsuki_optimize::write_config_summary(
-                &mut log_writer,
-                &kp,
-                &corpus_path,
-                seed,
-                &search_config,
-                &weights,
-                &toml_config,
-                &exclusive_pairs,
-            );
-
-            let initial = search::build_initial_layout(
-                &ctx, kp, search_config.initial_layout_mode, &mut rng, &mut log_writer,
-            );
-            let initial_score = score(&initial, &corpus, &weights);
-            tsuki_optimize::write_initial_layout(&mut log_writer, &initial, &corpus, &weights);
-
+            // GUI には SIGUSR1 相当の中間報告がないので常に false
             let report_flag = Arc::new(AtomicBool::new(false));
-
-            let best_layout = search::run(
-                initial,
-                &ctx,
-                &search_config,
-                &mut rng,
-                &stop_flag,
-                &report_flag,
-                &mut move |update: &SearchUpdate| {
-                    let _ = tx.send(update.clone());
-                },
-                &mut log_writer,
-            );
-
-            // 最終結果をログに出力
-            tsuki_optimize::write_final_result(
-                &mut log_writer,
-                &best_layout,
-                &corpus,
-                &weights,
-                initial_score,
-            );
-            let _ = log_writer.flush();
+            run.execute(&mut log_writer, &stop_flag, &report_flag, &mut |update: &SearchUpdate| {
+                let _ = tx.send(update.clone());
+            });
         });
     }
 

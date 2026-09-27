@@ -4,9 +4,6 @@ use std::collections::HashMap;
 
 pub type CharId = u8;
 
-/// 3x10モードの文字数（参照用定数）
-#[allow(dead_code)]
-pub const NUM_CHARS: usize = 60;
 /// 配列サイズの上限。
 ///
 /// CharId空間はハイブリッド拗音方式のために領域分割される:

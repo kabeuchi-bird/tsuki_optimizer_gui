@@ -20,7 +20,7 @@ CI (`.github/workflows/ci.yml`) は Linux/Windows/macOS で build → test → c
 
 ## アーキテクチャ
 
-データの流れ: `config.toml`（+CLI 上書き）→ `KeyboardParams` / `Weights` / `SearchConfig` → コーパス解析 → 初期配列生成 → `search::run` → ログ出力。CLI と GUI の共通出力は `lib.rs` の `write_*` 関数に集約されている。
+データの流れ: `config.toml`（+CLI 上書き）→ `KeyboardParams` / `Weights` / `SearchConfig` → コーパス解析 → 初期配列生成 → `search::run` → ログ出力。CLI と GUI は設定の解決（CLI 引数 or GUI 入力欄）とエラー表示だけを持ち、コーパス読込（`load_corpus`）・ログ作成（`create_log_file`）・検証から結果出力までの本体（`Run::execute`）は `lib.rs` で共有する。
 
 - **`chars.rs`** — 文字は `CharId = u8` で扱う。ID 空間は領域分割されている: `[0..62)` 基底かな、`[62..64)` L1/L2 の void、`[64..64+npl)` 拗音面（子音 → void の順に動的採番）。`MAX_CHARS = 97`。子音/拗音 void の判定は `KeyboardParams::is_consonant` / `is_yoon_void` のみを使うこと。
 - **`layout.rs`** — `KeyboardParams`（`3x10` / `3x10_single_shift` / `3x11`、yoon 有無）と `Layout`（`char_to_slot` / `slot_to_char` の双方向マップ、両方の整合を常に保つ）。スロットは層ごとに連番（L1, L2, 拗音面）で、`physical_of` で物理キーに戻す。固定文字・シフトキー位置・排他ペア・拗音制約によるスワップ禁止判定（`swap_would_violate`）もここ。
