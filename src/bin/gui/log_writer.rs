@@ -5,7 +5,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use tsuki_optimize::chars::MAX_CHARS;
-use tsuki_optimize::layout::MAX_SLOTS;
 
 // ──────────────────────────────────────────────────────────────
 // 色分けモード
@@ -20,12 +19,10 @@ pub enum ColorMode {
 
 /// 色分けモードの事前計算データ
 pub enum ColorData {
-    Fitness {
-        freq_rank: [u8; MAX_CHARS],
-        /// スロット難易度ランク。拗音面を含む全スロット分を確保する。
-        slot_rank: [u8; MAX_SLOTS],
-        num_valid: f32,
-    },
+    /// 文字ごとの「頻度順位とスロット難易度順位のずれ」（0 = ぴったり、1 以上 = 最大のずれ）。
+    /// 基底かな（L1/L2）と子音（拗音面）は別々の群で順位付けする。
+    /// 更新ごとに一度だけ作るキャッシュなので、enum を肥大させないよう Box に入れる。
+    Fitness { mismatch: Box<[f32; MAX_CHARS]> },
     Frequency {
         max_freq: f64,
         /// シフトキーの打鍵頻度 [shift_left, shift_right]

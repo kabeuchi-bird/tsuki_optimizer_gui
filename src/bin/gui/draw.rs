@@ -7,7 +7,8 @@ use tsuki_optimize::corpus::Corpus;
 use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, keystrokes_for_slot, layer_of, physical_of, slot_col, slot_hand, slot_row,
-    yoon_physical_forbidden, Hand, KeyboardSize, Layer, MAX_SLOTS, SHIFT_SLOT_SENTINEL,
+    yoon_physical_forbidden, Hand, KeyboardParams, KeyboardSize, Layer, MAX_SLOTS,
+    SHIFT_SLOT_SENTINEL,
 };
 use tsuki_optimize::yoon::consonant_label;
 use tsuki_optimize::search::SearchUpdate;
@@ -139,7 +140,6 @@ impl App {
                             };
                             char_color(
                                 char_id,
-                                layout.char_to_slot[char_id as usize],
                                 &self.latest_update.as_ref().unwrap().unigrams,
                                 color_data,
                                 extra,
@@ -489,46 +489,44 @@ fn precompute_color_data(
 
     match color_mode {
         ColorMode::Fitness => {
-            // 基底かな + 子音を頻度ランクの対象にする（void は除外）
-            let mut freq_sorted: Vec<(CharId, f64)> = kp
-                .scored_chars()
-                .filter(|&c| is_base_kana(c) || kp.is_consonant(c))
-                .map(|c| (c, upd.unigrams[c as usize]))
-                .collect();
-            freq_sorted.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-            let mut freq_rank = [0u8; MAX_CHARS];
-            for (rank, &(c, _)) in freq_sorted.iter().enumerate() {
-                freq_rank[c as usize] = rank as u8;
-            }
+            // 「頻出文字ほど打ちやすいスロットにあるか」を順位の食い違いで見る。
+            // 文字とスロットは同じ母集団どうしで順位を付けないと尺度がずれる。
+            // 拗音面の子音は L1/L2 の基底かなとは独立に配置されるので別の群にする
+            // （まとめると、void を含む拗音面30スロットが L1 と同じ難易度で割り込み、
+            //   L1/L2 の順位がそろって押し下げられて全体が赤くなる）。
+            let mut mismatch = Box::new([0.0f32; MAX_CHARS]);
+            for consonants in [false, true] {
+                let mut chars: Vec<(CharId, f64)> = kp
+                    .scored_chars()
+                    .filter(|&c| if consonants { kp.is_consonant(c) } else { is_base_kana(c) })
+                    .map(|c| (c, upd.unigrams[c as usize]))
+                    .collect();
+                chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-            let mut slot_sorted: Vec<(u8, f64)> = (0..kp.num_slots as u8)
-                .filter(|&s| layout.slot_to_char[s as usize] != SHIFT_SLOT_SENTINEL)
-                .map(|s| {
-                    let physical = physical_of(s, kp);
-                    let r = slot_row(physical, kp.num_cols) as usize;
-                    let c = slot_col(physical, kp.num_cols) as usize;
-                    // L2 は前置シフトの分だけ不利。拗音面は1打なのでペナルティなし。
-                    let layer_penalty = match layer_of(s, kp) {
-                        Layer::L2 => 3.0,
-                        Layer::L1 | Layer::Yoon => 0.0,
-                    };
-                    let row_d = [1.3, 0.9, 1.5][r];
-                    let center = (kp.num_cols as f64 - 1.0) / 2.0;
-                    let col_d = ((c as f64 - center).abs() / center) * 0.8;
-                    (s, row_d + col_d + layer_penalty)
-                })
-                .collect();
-            slot_sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-            let mut slot_rank = [0u8; MAX_SLOTS];
-            for (rank, &(s, _)) in slot_sorted.iter().enumerate() {
-                slot_rank[s as usize] = rank as u8;
-            }
+                // スロットはこの群の文字が実際に置かれている位置だけを順位付けする。
+                // 難易度には左右対称の同値があるので、スロット番号順に並べてから整列し、
+                // 同値内の順位を決定的にする（none モードでは従来と同じ順位になる）。
+                let mut slots: Vec<(u8, f64)> = (0..kp.num_slots as u8)
+                    .filter(|&s| {
+                        let c = layout.slot_to_char[s as usize];
+                        c != SHIFT_SLOT_SENTINEL
+                            && if consonants { kp.is_consonant(c) } else { is_base_kana(c) }
+                    })
+                    .map(|s| (s, slot_difficulty_for_fitness(s, kp)))
+                    .collect();
+                slots.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
-            ColorData::Fitness {
-                freq_rank,
-                slot_rank,
-                num_valid: freq_sorted.len() as f32,
+                let mut slot_rank = [0u8; MAX_SLOTS];
+                for (rank, &(s, _)) in slots.iter().enumerate() {
+                    slot_rank[s as usize] = rank as u8;
+                }
+                let n = chars.len() as f32;
+                for (rank, &(c, _)) in chars.iter().enumerate() {
+                    let sr = slot_rank[layout.char_to_slot[c as usize] as usize];
+                    mismatch[c as usize] = (rank as f32 - sr as f32).abs() / (n * 0.3);
+                }
             }
+            ColorData::Fitness { mismatch }
         }
         ColorMode::Frequency => {
             // L2文字のシフト打鍵頻度を集計
@@ -575,6 +573,22 @@ fn precompute_color_data(
     }
 }
 
+/// フィットネスマップ用のスロット難易度（小さいほど打ちやすい）
+fn slot_difficulty_for_fitness(s: u8, kp: KeyboardParams) -> f64 {
+    let physical = physical_of(s, kp);
+    let r = slot_row(physical, kp.num_cols) as usize;
+    let c = slot_col(physical, kp.num_cols) as usize;
+    // L2 は前置シフトの分だけ不利。拗音面は1打なのでペナルティなし。
+    let layer_penalty = match layer_of(s, kp) {
+        Layer::L2 => 3.0,
+        Layer::L1 | Layer::Yoon => 0.0,
+    };
+    let row_d = [1.3, 0.9, 1.5][r];
+    let center = (kp.num_cols as f64 - 1.0) / 2.0;
+    let col_d = ((c as f64 - center).abs() / center) * 0.8;
+    row_d + col_d + layer_penalty
+}
+
 /// シフトキー頻度から色を計算（ヒートマップモード用）
 fn shift_slot_color(freq: f64, max_freq: f64) -> egui::Color32 {
     let ratio = (freq / max_freq).min(1.0);
@@ -599,21 +613,13 @@ fn shift_slot_color(freq: f64, max_freq: f64) -> egui::Color32 {
 /// 1文字の色を計算（extra_freq: シフト打鍵等の追加頻度）
 fn char_color(
     char_id: CharId,
-    slot: u8,
     unigrams: &[f64; MAX_CHARS],
     data: &ColorData,
     extra_freq: f64,
 ) -> egui::Color32 {
     match data {
-        ColorData::Fitness {
-            freq_rank,
-            slot_rank,
-            num_valid,
-        } => {
-            let fr = freq_rank[char_id as usize] as f32;
-            let sr = slot_rank[slot as usize] as f32;
-            let mismatch = (fr - sr).abs() / (num_valid * 0.3);
-            let t = mismatch.min(1.0);
+        ColorData::Fitness { mismatch } => {
+            let t = mismatch[char_id as usize].min(1.0);
             if t < 0.5 {
                 let s = t * 2.0;
                 egui::Color32::from_rgb(
@@ -649,4 +655,5 @@ fn char_color(
         ColorData::None => egui::Color32::from_rgb(220, 220, 220),
     }
 }
+
 
