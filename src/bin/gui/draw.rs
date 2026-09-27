@@ -490,28 +490,23 @@ fn precompute_color_data(
     match color_mode {
         ColorMode::Fitness => {
             // 「頻出文字ほど打ちやすいスロットにあるか」を順位の食い違いで見る。
-            // 文字とスロットは同じ母集団どうしで順位を付けないと尺度がずれる。
-            // 拗音面の子音は L1/L2 の基底かなとは独立に配置されるので別の群にする
-            // （まとめると、void を含む拗音面30スロットが L1 と同じ難易度で割り込み、
-            //   L1/L2 の順位がそろって押し下げられて全体が赤くなる）。
+            // 基底かな（L1/L2）と子音（拗音面）は独立に配置されるので別の群で順位付けする。
             let mut mismatch = Box::new([0.0f32; MAX_CHARS]);
             for consonants in [false, true] {
+                let in_group =
+                    |c: CharId| if consonants { kp.is_consonant(c) } else { is_base_kana(c) };
                 let mut chars: Vec<(CharId, f64)> = kp
                     .scored_chars()
-                    .filter(|&c| if consonants { kp.is_consonant(c) } else { is_base_kana(c) })
+                    .filter(|&c| in_group(c))
                     .map(|c| (c, upd.unigrams[c as usize]))
                     .collect();
                 chars.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-                // スロットはこの群の文字が実際に置かれている位置だけを順位付けする。
-                // 難易度には左右対称の同値があるので、スロット番号順に並べてから整列し、
-                // 同値内の順位を決定的にする（none モードでは従来と同じ順位になる）。
+                // スロットはこの群の文字が置かれている位置だけを順位付けする。難易度の
+                // 同値（左右対称）の順は整列の入力順で決まるので、従来と同じくスロット
+                // 番号順に並べる（none モードの色を従来と一致させるため）。
                 let mut slots: Vec<(u8, f64)> = (0..kp.num_slots as u8)
-                    .filter(|&s| {
-                        let c = layout.slot_to_char[s as usize];
-                        c != SHIFT_SLOT_SENTINEL
-                            && if consonants { kp.is_consonant(c) } else { is_base_kana(c) }
-                    })
+                    .filter(|&s| in_group(layout.slot_to_char[s as usize]))
                     .map(|s| (s, slot_difficulty_for_fitness(s, kp)))
                     .collect();
                 slots.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
@@ -573,7 +568,8 @@ fn precompute_color_data(
     }
 }
 
-/// フィットネスマップ用のスロット難易度（小さいほど打ちやすい）
+/// フィットネスマップ用のスロット難易度（小さいほど打ちやすい）。
+/// 表示用の目安で、最適化が使う `Weights.slot_difficulty` とは独立している。
 fn slot_difficulty_for_fitness(s: u8, kp: KeyboardParams) -> f64 {
     let physical = physical_of(s, kp);
     let r = slot_row(physical, kp.num_cols) as usize;
@@ -655,5 +651,3 @@ fn char_color(
         ColorData::None => egui::Color32::from_rgb(220, 220, 220),
     }
 }
-
-
