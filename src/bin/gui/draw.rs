@@ -4,7 +4,7 @@ use egui_plot::{Line, PlotPoints, VLine};
 
 use tsuki_optimize::chars::{is_base_kana, CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, Weights};
+use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, unigram_cost_for_slot, Weights};
 use tsuki_optimize::layout::{
     col_to_finger, keystrokes_for_slot, layer_of, physical_of, slot_col, slot_hand, slot_row,
     yoon_physical_forbidden, Hand, KeyboardParams, KeyboardSize, Layer, MAX_SLOTS,
@@ -507,7 +507,7 @@ fn precompute_color_data(
                 // 番号順に並べる（none モードの色を従来と一致させるため）。
                 let mut slots: Vec<(u8, f64)> = (0..kp.num_slots as u8)
                     .filter(|&s| in_group(layout.slot_to_char[s as usize]))
-                    .map(|s| (s, slot_difficulty_for_fitness(s, kp)))
+                    .map(|s| (s, slot_difficulty_for_fitness(s, kp, weights)))
                     .collect();
                 slots.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
@@ -569,8 +569,16 @@ fn precompute_color_data(
 }
 
 /// フィットネスマップ用のスロット難易度（小さいほど打ちやすい）。
-/// 表示用の目安で、最適化が使う `Weights.slot_difficulty` とは独立している。
-fn slot_difficulty_for_fitness(s: u8, kp: KeyboardParams) -> f64 {
+///
+/// 最適化が1文字あたりに課すコスト（打鍵数 × stroke_scale + `slot_difficulty` による
+/// スロット難易度と文字内トランジション）をそのまま使い、マップの色が最適化の判断と
+/// 一致するようにする。打鍵数の項が L1 と L2 を分けている（難易度だけだと安い L2 が
+/// 高い L1 の間に割り込む）。重みがまだ無いとき（探索開始前）だけ行・列の目安で代用する。
+fn slot_difficulty_for_fitness(s: u8, kp: KeyboardParams, weights: Option<&Weights>) -> f64 {
+    if let Some(w) = weights {
+        let strokes = keystrokes_for_slot(s, kp).as_slice().len() as f64;
+        return strokes * w.stroke_scale + unigram_cost_for_slot(s, w);
+    }
     let physical = physical_of(s, kp);
     let r = slot_row(physical, kp.num_cols) as usize;
     let c = slot_col(physical, kp.num_cols) as usize;
