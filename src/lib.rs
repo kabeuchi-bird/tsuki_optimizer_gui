@@ -16,11 +16,14 @@ pub fn local_timestamp() -> String {
     chrono::Local::now().format("%y%m%d_%H%M%S").to_string()
 }
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-/// 設定サマリーを出力する（CLI / GUI 共通）
+/// 設定サマリーを出力する
 #[allow(clippy::too_many_arguments)]
-pub fn write_config_summary(
+fn write_config_summary(
     out: &mut impl Write,
     kp: &layout::KeyboardParams,
     corpus_path: &str,
@@ -66,13 +69,7 @@ pub fn write_config_summary(
         " perturbation  = {} swaps/restart",
         search_config.perturbation_swaps
     );
-    let _ = writeln!(
-        out,
-        " tenure         grow_threshold={:.2}  grow_interval={}  max_scale={:.1}",
-        search_config.tenure_grow_threshold,
-        search_config.tenure_grow_interval,
-        search_config.tenure_max_scale
-    );
+    let _ = writeln!(out, " diversify_th  = {:.2}", search_config.diversify_threshold);
     let _ = writeln!(
         out,
         " diversification= {:.2}{}",
@@ -131,57 +128,6 @@ pub fn write_config_summary(
     let _ = writeln!(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
-/// コーパス統計を出力する（CLI / GUI 共通）
-pub fn write_corpus_stats(out: &mut impl Write, stats: &corpus::CorpusStats) {
-    let _ = writeln!(
-        out,
-        "コーパス統計: 有効文字数={}, スキップ文字数={}, セグメント数={}, \
-         ユニグラム種={}, バイグラム種={}, トライグラム種={}",
-        stats.total_chars,
-        stats.skipped_chars,
-        stats.num_segments,
-        stats.num_unigrams,
-        stats.num_bigrams,
-        stats.num_trigrams,
-    );
-}
-
-/// 初期解を出力する（CLI / GUI 共通）
-pub fn write_initial_layout(
-    out: &mut impl Write,
-    layout: &layout::Layout,
-    corpus: &corpus::Corpus,
-    weights: &cost::Weights,
-) {
-    let _ = writeln!(out, "【初期解】");
-    layout.display(out);
-    cost::score_breakdown(layout, corpus, weights, out);
-    cost::write_top_bigrams(layout, corpus, weights, out);
-}
-
-/// 最終結果を出力する（CLI / GUI 共通）
-pub fn write_final_result(
-    out: &mut impl Write,
-    best_layout: &layout::Layout,
-    corpus: &corpus::Corpus,
-    weights: &cost::Weights,
-    initial_score: f64,
-) {
-    let _ = writeln!(out, "\n【最適化結果】");
-    best_layout.display(out);
-    cost::score_breakdown(best_layout, corpus, weights, out);
-    cost::write_top_bigrams(best_layout, corpus, weights, out);
-    let best_score = cost::score(best_layout, corpus, weights);
-    let _ = writeln!(out, "\n初期スコア : {:.4}", initial_score);
-    let _ = writeln!(out, "最良スコア : {:.4}", best_score);
-    let _ = writeln!(
-        out,
-        "改善幅     : {:.4}  ({:.2}%)",
-        initial_score - best_score,
-        (initial_score - best_score) / initial_score.abs() * 100.0
-    );
-}
-
 /// コーパスを読み込む。存在しない・読めない・認識可能な文字がない場合は Err（CLI / GUI 共通）
 pub fn load_corpus(path: &str, table: Option<&yoon::YoonTable>) -> Result<corpus::Corpus, String> {
     let p = std::path::Path::new(path);
@@ -206,6 +152,55 @@ pub fn create_log_file(path: &str) -> Result<std::fs::File, String> {
     std::fs::File::create(path).map_err(|e| format!("ログファイルを作成できません ({path}): {e}"))
 }
 
+/// 出力先 `sink` とログファイルの両方に書き込む（CLI / GUI 共通）
+///
+/// ログファイル書き込みに失敗した場合は `sink` に通知し、stop_flag を立てて探索を中断する。
+/// 書き込みエラーは io_error に保持し、探索終了後に呼び出し側から参照する。
+pub struct LogTee<W: Write> {
+    sink: W,
+    file: Option<BufWriter<File>>,
+    stop_flag: Arc<AtomicBool>,
+    pub io_error: Option<String>,
+}
+
+impl<W: Write> LogTee<W> {
+    pub fn new(sink: W, file: File, stop_flag: Arc<AtomicBool>) -> Self {
+        LogTee {
+            sink,
+            file: Some(BufWriter::new(file)),
+            stop_flag,
+            io_error: None,
+        }
+    }
+
+    fn record_error(&mut self, e: std::io::Error) {
+        let msg = format!("ログファイル書き込みエラー: {e}");
+        let _ = writeln!(self.sink, "⚠ {msg} → 探索を中断します。");
+        self.io_error = Some(msg);
+        self.stop_flag.store(true, Ordering::Relaxed);
+        // これ以上のファイル書き込み試行を停止
+        self.file = None;
+    }
+}
+
+impl<W: Write> Write for LogTee<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.sink.write_all(buf);
+        if let Some(Err(e)) = self.file.as_mut().map(|f| f.write_all(buf)) {
+            self.record_error(e);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.sink.flush();
+        if let Some(Err(e)) = self.file.as_mut().map(|f| f.flush()) {
+            self.record_error(e);
+        }
+        Ok(())
+    }
+}
+
 /// 探索1回分の入力（CLI / GUI 共通）
 pub struct Run {
     pub toml_config: config::Config,
@@ -223,14 +218,25 @@ impl Run {
     pub fn execute(
         &self,
         out: &mut impl Write,
-        stop_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-        report_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stop_flag: &Arc<AtomicBool>,
+        report_flag: &Arc<AtomicBool>,
         on_update: &mut impl FnMut(&search::SearchUpdate),
     ) {
         use rand::SeedableRng;
 
         let kp = self.yoon.kp;
-        write_corpus_stats(out, &self.corpus.stats);
+        let st = &self.corpus.stats;
+        let _ = writeln!(
+            out,
+            "コーパス統計: 有効文字数={}, スキップ文字数={}, セグメント数={}, \
+             ユニグラム種={}, バイグラム種={}, トライグラム種={}",
+            st.total_chars,
+            st.skipped_chars,
+            st.num_segments,
+            st.num_unigrams,
+            st.num_bigrams,
+            st.num_trigrams,
+        );
         self.toml_config.validate(out);
         self.search_config.validate(out);
         write_config_summary(
@@ -258,12 +264,30 @@ impl Run {
             &ctx, kp, self.search_config.initial_layout_mode, &mut rng, out,
         );
         let initial_score = cost::score(&initial, &self.corpus, &self.weights);
-        write_initial_layout(out, &initial, &self.corpus, &self.weights);
+        let _ = writeln!(out, "【初期解】");
+        self.write_layout_report(out, &initial);
 
         let best = search::run(
             initial, &ctx, &self.search_config, &mut rng, stop_flag, report_flag, on_update, out,
         );
-        write_final_result(out, &best, &self.corpus, &self.weights, initial_score);
+        let _ = writeln!(out, "\n【最適化結果】");
+        self.write_layout_report(out, &best);
+        let best_score = cost::score(&best, &self.corpus, &self.weights);
+        let _ = writeln!(out, "\n初期スコア : {:.4}", initial_score);
+        let _ = writeln!(out, "最良スコア : {:.4}", best_score);
+        let _ = writeln!(
+            out,
+            "改善幅     : {:.4}  ({:.2}%)",
+            initial_score - best_score,
+            (initial_score - best_score) / initial_score.abs() * 100.0
+        );
         let _ = out.flush();
+    }
+
+    /// 配列図・スコア内訳・上位バイグラムを出力する
+    fn write_layout_report(&self, out: &mut impl Write, layout: &layout::Layout) {
+        layout.display(out);
+        cost::score_breakdown(layout, &self.corpus, &self.weights, out);
+        cost::write_top_bigrams(layout, &self.corpus, &self.weights, out);
     }
 }

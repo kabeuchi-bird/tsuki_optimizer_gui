@@ -29,7 +29,7 @@ CI (`.github/workflows/ci.yml`) は Linux/Windows/macOS で build → test → c
 - **`search.rs`** — タブーサーチ本体。性能最優先のホットループで、ループ内のヒープアロケーションは避ける（バッファは事前確保して `_into` 系関数で再利用）。要素:
   - 操作種別 `OpKind`（L1内 / L2内 / 層間 / 拗音面）ごとにタブーテニュアを**近傍サイズ比**（`tabu_ratio`）で持ち、初回反復の実測候補数から実手数を決める。
   - タブー判定はペアインデックスのビットセット、`DeltaPairCache` は u128 の dirty mask で無効化（`MAX_CHARS <= 128` を静的アサート）。
-  - 停滞時にテニュア拡大・頻度ベース長期記憶（`diversification`）、さらに停滞でリスタート（摂動シャッフル）。
+  - テニュアは固定。停滞時に頻度ベース長期記憶（`diversification`）、さらに停滞でリスタート（摂動シャッフル）。
   - 停止/中間報告は `Arc<AtomicBool>`（CLI では SIGINT/SIGUSR1、GUI では停止ボタン）、進捗は `on_update` コールバックで `SearchUpdate` を渡す。
 - **`yoon.rs`** — ハイブリッド拗音方式（子音1打＋後置シフト `ゃゅょ`）。子音レジストリと `YoonSetup`。
 - **`user_layout.rs`** — `initial_layout.toml` の読み込み・検証。失敗時はランダム配置にフォールバック。

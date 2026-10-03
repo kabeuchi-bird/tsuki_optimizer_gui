@@ -24,68 +24,11 @@
 //                           "none"（デフォルト）/ "hybrid"
 //   --log           <path>  ログファイルパス         (省略時: log/YYMMDD_HHMMSS.log)
 
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tsuki_optimize::config::{keyboard_params_from_str, Config};
 use tsuki_optimize::search;
-
-// ──────────────────────────────────────────────────────────────
-// TeeWriter: stderr とログファイルの両方に書き込む
-//
-// ログファイル書き込みに失敗した場合は stop_flag を立てて探索を中断する。
-// 書き込みエラーは io_error に保持し、探索終了後に呼び出し側から参照する。
-// ──────────────────────────────────────────────────────────────
-struct TeeWriter {
-    file: Option<BufWriter<File>>,
-    stop_flag: Arc<AtomicBool>,
-    io_error: Option<String>,
-}
-
-impl TeeWriter {
-    fn new(file: File, stop_flag: Arc<AtomicBool>) -> Self {
-        TeeWriter {
-            file: Some(BufWriter::new(file)),
-            stop_flag,
-            io_error: None,
-        }
-    }
-
-    fn record_error(&mut self, e: io::Error) {
-        if self.io_error.is_none() {
-            let msg = format!("ログファイル書き込みエラー: {e}");
-            eprintln!("エラー: {msg} → 探索を中断します。");
-            self.io_error = Some(msg);
-            self.stop_flag.store(true, Ordering::Relaxed);
-            // これ以上のファイル書き込み試行を停止
-            self.file = None;
-        }
-    }
-}
-
-impl Write for TeeWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let _ = io::stderr().write_all(buf);
-        if let Some(ref mut f) = self.file {
-            if let Err(e) = f.write_all(buf) {
-                self.record_error(e);
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let _ = io::stderr().flush();
-        if let Some(ref mut f) = self.file {
-            if let Err(e) = f.flush() {
-                self.record_error(e);
-            }
-        }
-        Ok(())
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -99,26 +42,18 @@ fn main() {
     let config_path = Path::new(config_path_str);
 
     let toml_config = if config_path.exists() {
-        match Config::from_file(config_path) {
-            Ok(c) => {
-                eprintln!("設定ファイル読み込み: {}", config_path.display());
-                c
-            }
-            Err(e) => {
-                eprintln!("エラー: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        if config_path_str != "config.toml" {
-            eprintln!(
-                "エラー: 設定ファイルが見つかりません: {}",
-                config_path.display()
-            );
+        eprintln!("設定ファイル読み込み: {}", config_path.display());
+        Config::from_file(config_path).unwrap_or_else(|e| {
+            eprintln!("エラー: {}", e);
             std::process::exit(1);
-        }
+        })
+    } else if config_path_str == "config.toml" {
         eprintln!("設定ファイルなし → デフォルト値で起動します");
         Config::default()
+    } else {
+        // 明示指定されたファイルが無いのはエラー（デフォルトの config.toml だけは省略可）
+        eprintln!("エラー: 設定ファイルが見つかりません: {}", config_path.display());
+        std::process::exit(1);
     };
 
     // ── キーボードサイズ決定（CLI > TOML > デフォルト）──
@@ -195,7 +130,7 @@ fn main() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let report_flag = Arc::new(AtomicBool::new(false));
 
-    // ── ログファイル作成 + TeeWriter ─────────────
+    // ── ログファイル作成（stderr とログファイルの両方に書く）──
     let log_path = cli
         .get("--log")
         .cloned()
@@ -205,7 +140,7 @@ fn main() {
         std::process::exit(1);
     });
     eprintln!("ログファイル: {log_path}");
-    let mut out = TeeWriter::new(log_file, Arc::clone(&stop_flag));
+    let mut out = tsuki_optimize::LogTee::new(std::io::stderr(), log_file, Arc::clone(&stop_flag));
 
     // ── シグナルハンドラ登録 ─────────────────────
     #[cfg(unix)]

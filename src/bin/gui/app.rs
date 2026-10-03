@@ -1,5 +1,5 @@
-use std::io::BufWriter;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tsuki_optimize::cost::Weights;
 use tsuki_optimize::search::{self, SearchPhase, SearchUpdate};
 use tsuki_optimize::yoon::{YoonMode, YoonSetup};
 
-use super::log_writer::{ColorData, ColorMode, GuiLogWriter};
+use super::log_writer::{ChannelWriter, ColorData, ColorMode};
 
 // ──────────────────────────────────────────────────────────────
 // アプリケーション状態
@@ -69,17 +69,12 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         // config.toml があれば読み込み、GUI の初期値に反映する
-        let config_path = Path::new("config.toml");
-        let (toml_config, config_error) = if config_path.exists() {
-            match Config::from_file(config_path) {
-                Ok(c) => (c, None),
-                Err(e) => (
-                    Config::default(),
-                    Some(format!("config.toml 読み込みエラー（デフォルト値で起動）: {e}")),
-                ),
-            }
-        } else {
-            (Config::default(), None)
+        let (toml_config, config_error) = match Config::load_or_default(Path::new("config.toml")) {
+            Ok(c) => (c, None),
+            Err(e) => (
+                Config::default(),
+                Some(format!("config.toml 読み込みエラー（デフォルト値で起動）: {e}")),
+            ),
         };
         let search_config = toml_config.build_search_config();
         let corpus_path = toml_config.corpus_path(None);
@@ -140,20 +135,15 @@ impl App {
 
     pub fn start_search(&mut self) {
         self.config_error = None;
+        if let Err(e) = self.try_start_search() {
+            self.config_error = Some(e);
+            self.running = false;
+        }
+    }
 
+    fn try_start_search(&mut self) -> Result<(), String> {
         // 設定読み込み
-        let config_path = Path::new("config.toml");
-        let toml_config = if config_path.exists() {
-            match Config::from_file(config_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    self.config_error = Some(e);
-                    return;
-                }
-            }
-        } else {
-            Config::default()
-        };
+        let toml_config = Config::load_or_default(Path::new("config.toml"))?;
 
         let kp = keyboard_params_from_str(&self.keyboard_size_str_input);
 
@@ -165,13 +155,7 @@ impl App {
         } else {
             Some(self.consonants_str_input.trim())
         };
-        let yoon = match YoonSetup::resolve(kp, yoon_mode, consonants) {
-            Ok(y) => y,
-            Err(e) => {
-                self.config_error = Some(e);
-                return;
-            }
-        };
+        let yoon = YoonSetup::resolve(kp, yoon_mode, consonants)?;
         let kp = yoon.kp;
 
         let exclusive_pairs = toml_config.build_exclusive_pairs();
@@ -179,53 +163,20 @@ impl App {
         let weights = toml_config.build_weights(kp);
 
         // パラメータ入力欄のパース（空欄はデフォルト維持、不正値はエラー）
-        if !self.iter_str.is_empty() {
-            match self.iter_str.parse::<usize>() {
-                Ok(v) => search_config.max_iter = v,
-                Err(e) => {
-                    self.config_error =
-                        Some(format!("iter の値が不正です ('{}'): {e}", self.iter_str));
-                    return;
-                }
-            }
+        if let Some(v) = parse_field("iter", &self.iter_str)? {
+            search_config.max_iter = v;
         }
-        if !self.restart_str.is_empty() {
-            match self.restart_str.parse::<usize>() {
-                Ok(v) => search_config.restart_after = v,
-                Err(e) => {
-                    self.config_error = Some(format!(
-                        "restart の値が不正です ('{}'): {e}",
-                        self.restart_str
-                    ));
-                    return;
-                }
-            }
+        if let Some(v) = parse_field("restart", &self.restart_str)? {
+            search_config.restart_after = v;
         }
 
         search_config.initial_layout_mode =
             search::InitialLayoutMode::from_config_str(&self.initial_layout_str_input);
 
-        let seed: u64 = if self.seed_str.is_empty() {
-            rand::random()
-        } else {
-            match self.seed_str.parse() {
-                Ok(v) => v,
-                Err(e) => {
-                    self.config_error =
-                        Some(format!("seed の値が不正です ('{}'): {e}", self.seed_str));
-                    return;
-                }
-            }
-        };
+        let seed: u64 = parse_field("seed", &self.seed_str)?.unwrap_or_else(rand::random);
 
         let corpus_path = self.corpus_path_str.clone();
-        let corpus = match tsuki_optimize::load_corpus(&corpus_path, yoon.table.as_ref()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.config_error = Some(e);
-                return;
-            }
-        };
+        let corpus = tsuki_optimize::load_corpus(&corpus_path, yoon.table.as_ref())?;
 
         // GUI側でスコア内訳計算用にコピーを保持
         self.corpus = Some(corpus.clone());
@@ -252,21 +203,14 @@ impl App {
 
         // ログファイル作成
         let log_path = format!("log/{}.log", tsuki_optimize::local_timestamp());
-        let log_file = match tsuki_optimize::create_log_file(&log_path) {
-            Ok(f) => BufWriter::new(f),
-            Err(e) => {
-                self.config_error = Some(e);
-                self.running = false;
-                return;
-            }
-        };
+        let log_file = tsuki_optimize::create_log_file(&log_path)?;
 
         let stop_flag = Arc::clone(&self.stop_flag);
-        let mut log_writer = GuiLogWriter {
-            tx: log_tx,
-            file: Some(log_file),
-            stop_flag: Arc::clone(&self.stop_flag),
-        };
+        let mut log_writer = tsuki_optimize::LogTee::new(
+            ChannelWriter(log_tx),
+            log_file,
+            Arc::clone(&self.stop_flag),
+        );
         let run = tsuki_optimize::Run {
             toml_config,
             yoon,
@@ -285,6 +229,7 @@ impl App {
                 let _ = tx.send(update.clone());
             });
         });
+        Ok(())
     }
 
     pub fn stop_search(&mut self) {
@@ -335,4 +280,17 @@ impl App {
             }
         }
     }
+}
+
+/// 入力欄をパースする。空欄は None（デフォルト維持）、不正値はエラーメッセージ
+fn parse_field<T: FromStr>(name: &str, s: &str) -> Result<Option<T>, String>
+where
+    T::Err: std::fmt::Display,
+{
+    if s.is_empty() {
+        return Ok(None);
+    }
+    s.parse()
+        .map(Some)
+        .map_err(|e| format!("{name} の値が不正です ('{s}'): {e}"))
 }

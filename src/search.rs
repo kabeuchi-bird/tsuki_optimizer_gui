@@ -126,47 +126,26 @@ fn tenure_from_ratio(ratio: f64, neighborhood: usize) -> usize {
 }
 
 /// ——————————————————————————————
-/// 操作種別ごとのタブーリスト一式（テニュアの拡大・リセットを含む）
+/// 操作種別ごとのタブーリスト一式
 ///
 /// L1内 / L2内 / 層間 / 拗音面内 の4種を `OpKind` で添字づけして扱い、
 /// 操作種別を増やしても run() 側の分岐が増えないようにする。
+///
+/// テニュアは固定。停滞時に拡大する仕組みもあったが、多様化（`diversification`）
+/// 導入後は拡大の有無で結果が変わらなくなったため廃止した（8シード×50000反復で平均一致）。
 /// ——————————————————————————————
 struct TabuSet {
     lists: [TabuList; NUM_OP_KINDS],
-    /// 設定値（リセット時に戻す基準）
-    base: [usize; NUM_OP_KINDS],
-    /// 現在のテニュア
-    cur: [usize; NUM_OP_KINDS],
-    /// 1回の拡大ステップ
-    step: [usize; NUM_OP_KINDS],
-    /// テニュア上限
-    max: [usize; NUM_OP_KINDS],
+    tenure: [usize; NUM_OP_KINDS],
 }
 
 impl TabuSet {
-    /// 設定と拡大パラメータからタブーリスト一式を構築する。
     /// テニュアは近傍サイズ比で与えられるので、ここで実際の手数へ変換する。
-    fn new(
-        ratios: [f64; NUM_OP_KINDS],
-        neighborhood: [usize; NUM_OP_KINDS],
-        grow_period: usize,
-        config: &SearchConfig,
-    ) -> Self {
-        let base = std::array::from_fn(|i| tenure_from_ratio(ratios[i], neighborhood[i]));
-        let step = base.map(|b| {
-            (b as f64 * (config.tenure_max_scale - 1.0) * config.tenure_grow_interval as f64
-                / grow_period as f64)
-                .ceil()
-                .max(1.0) as usize
-        });
-        // 拡大後の上限も同じ理由で全ペア数に頭打ちする
-        let max = base.map(|b| ((b as f64 * config.tenure_max_scale) as usize).min(NUM_PAIRS));
+    fn new(ratios: [f64; NUM_OP_KINDS], neighborhood: [usize; NUM_OP_KINDS]) -> Self {
+        let tenure = std::array::from_fn(|i| tenure_from_ratio(ratios[i], neighborhood[i]));
         TabuSet {
-            lists: std::array::from_fn(|i| TabuList::new(base[i])),
-            base,
-            cur: base,
-            step,
-            max,
+            lists: tenure.map(TabuList::new),
+            tenure,
         }
     }
 
@@ -180,47 +159,14 @@ impl TabuSet {
         self.lists[kind as usize].add(c1, c2);
     }
 
-    /// 現在のテニュアでリストを作り直す（内容は破棄される）
-    fn rebuild(&mut self) {
-        for (list, &cap) in self.lists.iter_mut().zip(self.cur.iter()) {
-            *list = TabuList::new(cap);
-        }
+    /// タブー内容を破棄する（再起動時）
+    fn clear(&mut self) {
+        self.lists = self.tenure.map(TabuList::new);
     }
 
-    /// テニュアを設定値へ戻す（改善時）。
-    ///
-    /// テニュアが拡大されていた場合のみ作り直す。`rebuild()` は内容を破棄するので、
-    /// 「拡大されていたら中身ごとリセット、拡大されていなければ何もしない」という挙動になる。
-    fn reset(&mut self) {
-        if self.cur != self.base {
-            self.cur = self.base;
-            self.rebuild();
-        }
-    }
-
-    /// テニュアを設定値へ戻し、タブー内容を必ず破棄する（再起動時）。
-    ///
-    /// `reset()` と違い、テニュアが設定値のままでも作り直す。
-    fn reset_and_clear(&mut self) {
-        self.cur = self.base;
-        self.rebuild();
-    }
-
-    /// テニュアを1ステップ拡大する。上限未満のものがあれば作り直して true を返す。
-    fn grow(&mut self) -> bool {
-        let grew = self.cur.iter().zip(self.max.iter()).any(|(c, m)| c < m);
-        for i in 0..NUM_OP_KINDS {
-            self.cur[i] = (self.cur[i] + self.step[i]).min(self.max[i]);
-        }
-        if grew {
-            self.rebuild();
-        }
-        grew
-    }
-
-    /// ログ表示用の現在テニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
+    /// ログ表示用のテニュア（"l1=15 l2=15 inter=25 [yoon=15]"）
     fn tenure_summary(&self, active: [bool; NUM_OP_KINDS]) -> String {
-        summarize_by_kind(&self.cur, active)
+        summarize_by_kind(&self.tenure, active)
     }
 }
 
@@ -578,9 +524,8 @@ pub struct SearchConfig {
     pub ab_sample_limit: usize,
     pub log_interval: usize,
     pub perturbation_swaps: usize,
-    pub tenure_grow_threshold: f64,
-    pub tenure_grow_interval: usize,
-    pub tenure_max_scale: f64,
+    /// 改善停止から `restart_after × この割合` を超えると多様化を効かせ始める
+    pub diversify_threshold: f64,
     /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
     ///
     /// 停滞時に「よく使ったスワップ」へ最大この値のペナルティを課し、探索を
@@ -602,9 +547,7 @@ impl Default for SearchConfig {
             ab_sample_limit: 200,
             log_interval: 1_000,
             perturbation_swaps: 8,
-            tenure_grow_threshold: 0.5,
-            tenure_grow_interval: 200,
-            tenure_max_scale: 3.0,
+            diversify_threshold: 0.5,
             diversification: 0.8,
             initial_layout_mode: InitialLayoutMode::default(),
         }
@@ -619,9 +562,6 @@ impl SearchConfig {
         }
         if self.log_interval == 0 {
             let _ = writeln!(out, "警告: log_interval=0 → ログ出力を無効化します");
-        }
-        if self.tenure_grow_interval == 0 {
-            let _ = writeln!(out, "警告: tenure_grow_interval=0 → テニュア拡大を無効化します");
         }
         if self.restart_after == 0 {
             let _ = writeln!(out, "情報: restart_after=0 → 再起動なしで探索します");
@@ -675,11 +615,7 @@ pub fn run(
     let mut restarts = 0usize;
     let mut iter = 0usize;
 
-    let tenure_grow_start = (config.restart_after as f64 * config.tenure_grow_threshold) as usize;
-    let grow_period = config
-        .restart_after
-        .saturating_sub(tenure_grow_start)
-        .max(1);
+    let diversify_start = (config.restart_after as f64 * config.diversify_threshold) as usize;
 
     // 再利用バッファ（ループ外で確保してループ内で clear() して使い回す）
     let mut candidates: Vec<Candidate> =
@@ -691,7 +627,7 @@ pub fn run(
     // テニュアは近傍サイズ比なので、最初の反復で候補を数えるまで確定できない。
     // それまでは容量0で置いておく——1反復目のタブーリストはどのみち空なので、
     // 判定結果は本来のテニュアで作った場合と変わらない。
-    let mut tabu = TabuSet::new(config.tabu_ratio, [0; NUM_OP_KINDS], grow_period, config);
+    let mut tabu = TabuSet::new(config.tabu_ratio, [0; NUM_OP_KINDS]);
     // 拗音面の文字集合は kp から決まり探索中に変化しないので、一度だけ構築する
     let yoon_chars: Vec<CharId> = current.kp.yoon_char_range().map(|c| c as CharId).collect();
     // 実際に使われる CharId の上限（キャッシュ無効化の走査範囲）
@@ -768,7 +704,7 @@ pub fn run(
         // この時点でタブーリストは空なので、ここで作り直しても情報は失われない。
         if iter == 1 {
             let neighborhood = count_by_kind(&candidates);
-            tabu = TabuSet::new(config.tabu_ratio, neighborhood, grow_period, config);
+            tabu = TabuSet::new(config.tabu_ratio, neighborhood);
             let _ = writeln!(
                 out,
                 " 近傍サイズ(実測) {}\n テニュア(実手数) {}",
@@ -787,9 +723,8 @@ pub fn run(
         let mut best_aspiration: Option<Candidate> = None;
         let aspiration_threshold = best_score - current_score;
 
-        // 停滞している間だけ多様化ペナルティを効かせる。閾値はテニュア拡大と共有し、
-        // 「停滞したらタブーを伸ばし、同時に未探索方向へ誘導する」を一貫させる。
-        let diversify = if config.diversification > 0.0 && no_improve > tenure_grow_start {
+        // 停滞している間だけ多様化ペナルティを効かせ、未探索方向へ誘導する
+        let diversify = if config.diversification > 0.0 && no_improve > diversify_start {
             move_freq.penalty_coef(config.diversification)
         } else {
             0.0
@@ -844,15 +779,8 @@ pub fn run(
                 unigrams: Arc::clone(&unigrams_shared),
                 phase: SearchPhase::Running,
             });
-            tabu.reset();
         } else {
             no_improve += 1;
-            if config.tenure_grow_interval > 0
-                && no_improve > tenure_grow_start
-                && (no_improve - tenure_grow_start).is_multiple_of(config.tenure_grow_interval)
-            {
-                tabu.grow();
-            }
         }
 
         if config.log_interval > 0 && iter.is_multiple_of(config.log_interval) {
@@ -892,7 +820,7 @@ pub fn run(
             current_score = score(&current, ctx.corpus, ctx.weights);
             pair_cache.invalidate_all();
 
-            tabu.reset_and_clear();
+            tabu.clear();
 
             let _ = writeln!(
                 out,
@@ -1131,8 +1059,6 @@ fn generate_swap_candidates(
 struct InterLayerBufs {
     l1_chars: Vec<(CharId, f64)>,
     l2_chars: Vec<(CharId, f64)>,
-    l1_weights: Vec<f64>,
-    l2_weights: Vec<f64>,
 }
 
 impl InterLayerBufs {
@@ -1140,8 +1066,6 @@ impl InterLayerBufs {
         Self {
             l1_chars: Vec::with_capacity(num_chars),
             l2_chars: Vec::with_capacity(num_chars),
-            l1_weights: Vec::with_capacity(num_chars),
-            l2_weights: Vec::with_capacity(num_chars),
         }
     }
 }
@@ -1179,19 +1103,15 @@ fn generate_inter_layer_candidates(
         return;
     }
 
-    ibufs.l1_weights.clear();
-    ibufs.l1_weights.extend((0..ibufs.l1_chars.len()).map(|r| 1.0 / (r + 1) as f64));
-    ibufs.l2_weights.clear();
-    ibufs.l2_weights.extend((0..ibufs.l2_chars.len()).map(|r| 1.0 / (r + 1) as f64));
-    let l1_w_sum: f64 = ibufs.l1_weights.iter().sum();
-    let l2_w_sum: f64 = ibufs.l2_weights.iter().sum();
+    let l1_w_sum = harmonic(ibufs.l1_chars.len());
+    let l2_w_sum = harmonic(ibufs.l2_chars.len());
 
     let mut sampled = 0;
     let mut tries = 0;
     while sampled < n_samples && tries < n_samples * 5 {
         tries += 1;
-        let c1 = weighted_choice(&ibufs.l1_chars, &ibufs.l1_weights, l1_w_sum, rng).0;
-        let c2 = weighted_choice(&ibufs.l2_chars, &ibufs.l2_weights, l2_w_sum, rng).0;
+        let c1 = rank_weighted_choice(&ibufs.l1_chars, l1_w_sum, rng);
+        let c2 = rank_weighted_choice(&ibufs.l2_chars, l2_w_sum, rng);
         if swap_would_violate(layout, c1, c2, ctx.pairs) {
             continue;
         }
@@ -1206,20 +1126,21 @@ fn generate_inter_layer_candidates(
     }
 }
 
-fn weighted_choice<T: Copy>(
-    items: &[(T, f64)],
-    weights: &[f64],
-    w_sum: f64,
-    rng: &mut impl Rng,
-) -> (T, f64) {
+/// 調和数 H(n) = Σ_{r=0}^{n-1} 1/(r+1)（`rank_weighted_choice` の重み合計）
+fn harmonic(n: usize) -> f64 {
+    (0..n).map(|r| 1.0 / (r + 1) as f64).sum()
+}
+
+/// 順位 r の要素を重み 1/(r+1) で選ぶ。`w_sum` は `harmonic(items.len())`
+fn rank_weighted_choice<T: Copy>(items: &[(T, f64)], w_sum: f64, rng: &mut impl Rng) -> T {
     let mut r = rng.gen::<f64>() * w_sum;
-    for (i, &w) in weights.iter().enumerate() {
-        r -= w;
+    for (i, item) in items.iter().enumerate() {
+        r -= 1.0 / (i + 1) as f64;
         if r <= 0.0 {
-            return items[i];
+            return item.0;
         }
     }
-    *items.last().unwrap()
+    items.last().unwrap().0
 }
 
 /// ランダム摂動（再起動時）
@@ -2172,9 +2093,9 @@ mod tests {
             tabu_ratio: [1e20; NUM_OP_KINDS],
             ..SearchConfig::default()
         };
-        let tabu = TabuSet::new(config.tabu_ratio, [200; NUM_OP_KINDS], 1, &config);
+        let tabu = TabuSet::new(config.tabu_ratio, [200; NUM_OP_KINDS]);
         for kind in OpKind::ALL {
-            assert!(tabu.cur[kind as usize] <= NUM_PAIRS);
+            assert!(tabu.tenure[kind as usize] <= NUM_PAIRS);
         }
     }
 
