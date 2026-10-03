@@ -53,7 +53,10 @@ pub struct RunConfig {
     pub ab_sample_limit: Option<usize>,
     pub log_interval: Option<usize>,
     pub perturbation_swaps: Option<usize>,
-    pub tenure_grow_threshold: Option<f64>,
+    /// 多様化の開始閾値。旧名 `tenure_grow_threshold` も受け付ける。
+    #[serde(alias = "tenure_grow_threshold")]
+    pub diversify_threshold: Option<f64>,
+    /// 廃止済み（テニュア拡大）。受け取るだけで、値は使わず警告する。
     pub tenure_grow_interval: Option<usize>,
     pub tenure_max_scale: Option<f64>,
     /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
@@ -120,6 +123,15 @@ impl Config {
         toml::from_str(&text).map_err(|e| format!("設定ファイルのパースエラー: {}", e))
     }
 
+    /// 設定ファイルを読み込む。ファイルが無ければデフォルト値を返す（CLI / GUI 共通）
+    pub fn load_or_default(path: &Path) -> Result<Self, String> {
+        if path.exists() {
+            Self::from_file(path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
     /// keyboard_size 設定から KeyboardParams を生成する
     pub fn build_keyboard_params(&self) -> KeyboardParams {
         match self.run.keyboard_size.as_deref() {
@@ -138,17 +150,18 @@ impl Config {
     /// `build_search_config` は副作用を持たせず、警告はこちらに集める。
     pub fn validate(&self, out: &mut impl std::io::Write) {
         let r = &self.run;
-        for (key, given) in [
-            ("tabu_l1", r.tabu_l1.is_some()),
-            ("tabu_l2", r.tabu_l2.is_some()),
-            ("tabu_inter", r.tabu_inter.is_some()),
-            ("tabu_yoon", r.tabu_yoon.is_some()),
+        const TABU: &str = "（絶対手数指定）→ 無視します。近傍サイズ比で指定する [run.tabu_ratio] を使ってください";
+        const TENURE: &str = "（テニュア拡大は多様化で代替）→ 無視します";
+        for (key, given, hint) in [
+            ("tabu_l1", r.tabu_l1.is_some(), TABU),
+            ("tabu_l2", r.tabu_l2.is_some(), TABU),
+            ("tabu_inter", r.tabu_inter.is_some(), TABU),
+            ("tabu_yoon", r.tabu_yoon.is_some(), TABU),
+            ("tenure_grow_interval", r.tenure_grow_interval.is_some(), TENURE),
+            ("tenure_max_scale", r.tenure_max_scale.is_some(), TENURE),
         ] {
             if given {
-                let _ = writeln!(
-                    out,
-                    "警告: {key} は廃止されました（絶対手数指定）→ 無視します。近傍サイズ比で指定する [run.tabu_ratio] を使ってください"
-                );
+                let _ = writeln!(out, "警告: {key} は廃止されました{hint}");
             }
         }
     }
@@ -176,19 +189,13 @@ impl Config {
             ab_sample_limit: r.ab_sample_limit.unwrap_or(d.ab_sample_limit),
             log_interval: r.log_interval.unwrap_or(d.log_interval),
             perturbation_swaps: r.perturbation_swaps.unwrap_or(d.perturbation_swaps),
-            tenure_grow_threshold: r.tenure_grow_threshold.unwrap_or(d.tenure_grow_threshold),
-            tenure_grow_interval: r.tenure_grow_interval.unwrap_or(d.tenure_grow_interval),
-            tenure_max_scale: r.tenure_max_scale.unwrap_or(d.tenure_max_scale),
+            diversify_threshold: r.diversify_threshold.unwrap_or(d.diversify_threshold),
             diversification: r.diversification.unwrap_or(d.diversification),
-            initial_layout_mode: self.build_initial_layout_mode(),
+            initial_layout_mode: r
+                .initial_layout
+                .as_deref()
+                .map_or_else(InitialLayoutMode::default, InitialLayoutMode::from_config_str),
         }
-    }
-
-    pub fn build_initial_layout_mode(&self) -> InitialLayoutMode {
-        self.run
-            .initial_layout
-            .as_deref()
-            .map_or_else(InitialLayoutMode::default, InitialLayoutMode::from_config_str)
     }
 
     /// デフォルト値と設定ファイルの内容をマージして Weights を生成する
@@ -217,8 +224,11 @@ impl Config {
                 parse_difficulty_row(s.row1.as_deref(), d.slot_difficulty[1]),
                 parse_difficulty_row(s.row2.as_deref(), d.slot_difficulty[2]),
             ],
-            daku_l2_trigger: self.build_daku_l2_trigger(),
-            handaku_l2_trigger: self.build_handaku_l2_trigger(),
+            // L2 にある文字の直後に゛が来ると -1打鍵（゛は常にL1固定なのでトリガー対象外）
+            daku_l2_trigger: self
+                .preset_trigger("うかきくけこさしすせそたちつてとはひふへほ", "きしちひ"),
+            // L2 にある文字の直後に゜が来ると -1打鍵（対象はは行のみ）
+            handaku_l2_trigger: self.preset_trigger("はひふへほ", "ひ"),
         }
     }
 
@@ -335,20 +345,6 @@ impl Config {
             .collect()
     }
 
-    /// プリセットに基づいて daku_l2_trigger 配列を生成する
-    /// true の文字が L2 に配置されている状態で直後に゛が来ると -1打鍵のボーナスが入る
-    /// （゛は常にL1固定なのでトリガー対象から外す）
-    pub fn build_daku_l2_trigger(&self) -> [bool; MAX_CHARS] {
-        self.preset_trigger("うかきくけこさしすせそたちつてとはひふへほ", "きしちひ")
-    }
-
-    /// プリセットに基づいて handaku_l2_trigger 配列を生成する
-    /// true の文字が L2 に配置されている状態で直後に゜が来ると -1打鍵のボーナスが入る
-    /// 対象はは行（は,ひ,ふ,へ,ほ）のみ
-    pub fn build_handaku_l2_trigger(&self) -> [bool; MAX_CHARS] {
-        self.preset_trigger("はひふへほ", "ひ")
-    }
-
     /// preset に応じて all_daku / i_daku の文字を true にした配列を返す（preset なしは全 false）
     fn preset_trigger(&self, all_daku: &str, i_daku: &str) -> [bool; MAX_CHARS] {
         let mut trigger = [false; MAX_CHARS];
@@ -378,8 +374,8 @@ fn parse_difficulty_row(src: Option<&[f64]>, default: [f64; 11]) -> [f64; 11] {
         );
     }
     let mut arr = default;
-    for (i, &val) in v.iter().enumerate().take(11) {
-        arr[i] = val;
+    for (d, s) in arr.iter_mut().zip(v) {
+        *d = *s;
     }
     arr
 }

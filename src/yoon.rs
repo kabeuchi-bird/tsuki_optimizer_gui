@@ -29,19 +29,6 @@ impl YoonMode {
             }
         }
     }
-
-    /// 設定・ログ表示用の文字列。
-    pub fn config_label(&self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Hybrid => "hybrid",
-        }
-    }
-
-    /// この方式が拗音面（第3層）を持つか。
-    pub fn is_hybrid(&self) -> bool {
-        matches!(self, Self::Hybrid)
-    }
 }
 
 use std::collections::HashMap;
@@ -199,9 +186,8 @@ pub fn yoon_shift_id(c: char) -> Option<CharId> {
 pub struct YoonSetup {
     /// 拗音面を反映した KeyboardParams（none ならそのまま）
     pub kp: crate::layout::KeyboardParams,
-    /// 子音テーブル（none なら None）。`Corpus::from_file_with_yoon` に渡すこと。
+    /// 子音テーブル（none なら None。hybrid か否かもこれで判定する）。`Corpus::from_file_with_yoon` に渡すこと。
     pub table: Option<YoonTable>,
-    pub mode: YoonMode,
 }
 
 impl YoonSetup {
@@ -214,12 +200,8 @@ impl YoonSetup {
         mode: YoonMode,
         consonants: Option<&str>,
     ) -> Result<Self, String> {
-        if !mode.is_hybrid() {
-            return Ok(YoonSetup {
-                kp,
-                table: None,
-                mode,
-            });
+        if mode == YoonMode::None {
+            return Ok(YoonSetup { kp, table: None });
         }
         let table = YoonTable::from_spec(consonants.unwrap_or(DEFAULT_CONSONANTS))
             .map_err(|e| format!("子音セットが不正です: {e}"))?;
@@ -229,7 +211,6 @@ impl YoonSetup {
         Ok(YoonSetup {
             kp,
             table: Some(table),
-            mode,
         })
     }
 
@@ -237,7 +218,7 @@ impl YoonSetup {
     ///
     /// ゃゅょ が1打で打てなければ方式が成立しないため、hybrid では必須。
     pub fn extend_l1_only(&self, l1_only: &mut std::collections::HashSet<CharId>) {
-        if self.mode.is_hybrid() {
+        if self.table.is_some() {
             l1_only.extend(crate::chars::YOON_SHIFT_IDS);
         }
     }
@@ -272,8 +253,6 @@ mod tests {
         assert_eq!(YoonMode::from_config_str("none"), YoonMode::None);
         assert_eq!(YoonMode::from_config_str("hybrid"), YoonMode::Hybrid);
         assert_eq!(YoonMode::from_config_str("xxx"), YoonMode::None);
-        assert!(YoonMode::Hybrid.is_hybrid());
-        assert!(!YoonMode::None.is_hybrid());
     }
 
     #[test]

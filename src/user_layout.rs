@@ -54,69 +54,41 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
     let npl = kp.num_slots_per_layer as usize;
     let char_map = build_char_to_id();
 
-    if def.layer1.len() != 3 {
-        return Err(format!(
-            "layer1 は3行必要です（{}行）",
-            def.layer1.len()
-        ));
-    }
-    if def.layer2.len() != 3 {
-        return Err(format!(
-            "layer2 は3行必要です（{}行）",
-            def.layer2.len()
-        ));
+    for (layer, rows) in [("layer1", &def.layer1), ("layer2", &def.layer2)] {
+        if rows.len() != 3 {
+            return Err(format!("{layer} は3行必要です（{}行）", rows.len()));
+        }
     }
 
     // u8::MAX (= SHIFT_SLOT_SENTINEL) を「未割当」センチネルとして使用
-    // 有効スロット ID は 0..65 なので衝突しない
+    // 有効スロット ID は 0..65 なので衝突しない。3x11 のシフトキースロットもこの値のまま残る
     let mut cts = [u8::MAX; MAX_CHARS];
     let mut stc = [SHIFT_SLOT_SENTINEL; MAX_SLOTS];
-
-    // 3x11 のシフトキースロットを明示的に SHIFT_SLOT_SENTINEL で初期化
-    if kp.size == KeyboardSize::K3x11 {
-        stc[kp.shift_left as usize] = SHIFT_SLOT_SENTINEL;
-        stc[kp.shift_right as usize] = SHIFT_SLOT_SENTINEL;
-    }
 
     // void 文字（□）への CharId 割り当てカウンタ
     let mut void_next: CharId = VOID_CHAR_FIRST;
 
-    // Layer1 のパース
-    for (row, line) in def.layer1.iter().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() != nc {
-            return Err(format!(
-                "layer1 row{} は{}文字必要です（{}文字: {:?}）",
-                row, nc, chars.len(), line
-            ));
-        }
-        for (col, &c) in chars.iter().enumerate() {
-            let slot = (row * nc + col) as SlotId;
-
-            // 3x11: ☆★ 位置はシフトキー → 書かれた文字にかかわらずスキップ
-            if kp.size == KeyboardSize::K3x11
-                && (slot == kp.shift_left || slot == kp.shift_right)
-            {
-                stc[slot as usize] = SHIFT_SLOT_SENTINEL;
-                continue;
+    for (layer, rows, base) in [("layer1", &def.layer1, 0), ("layer2", &def.layer2, npl)] {
+        for (row, line) in rows.iter().enumerate() {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.len() != nc {
+                return Err(format!(
+                    "{} row{} は{}文字必要です（{}文字: {:?}）",
+                    layer, row, nc, chars.len(), line
+                ));
             }
+            for (col, &c) in chars.iter().enumerate() {
+                let slot = (base + row * nc + col) as SlotId;
 
-            assign_char(c, slot, &char_map, &mut cts, &mut stc, &mut void_next, row, col, "layer1")?;
-        }
-    }
+                // 3x11: ☆★ 位置（L1 のみ）はシフトキー → 書かれた文字にかかわらずスキップ
+                if kp.size == KeyboardSize::K3x11
+                    && (slot == kp.shift_left || slot == kp.shift_right)
+                {
+                    continue;
+                }
 
-    // Layer2 のパース
-    for (row, line) in def.layer2.iter().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() != nc {
-            return Err(format!(
-                "layer2 row{} は{}文字必要です（{}文字: {:?}）",
-                row, nc, chars.len(), line
-            ));
-        }
-        for (col, &c) in chars.iter().enumerate() {
-            let slot = (npl + row * nc + col) as SlotId;
-            assign_char(c, slot, &char_map, &mut cts, &mut stc, &mut void_next, row, col, "layer2")?;
+                assign_char(c, slot, &char_map, &mut cts, &mut stc, &mut void_next, row, col, layer)?;
+            }
         }
     }
 
