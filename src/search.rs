@@ -785,9 +785,8 @@ pub fn run(
 
         if config.log_interval > 0 && iter.is_multiple_of(config.log_interval) {
             let _ = writeln!(out,
-                "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5} | tenure {}{}",
+                "iter {:>6} | current {:.4} | best {:.4} | no_improve {:>5}{}",
                 iter, current_score, best_score, no_improve,
-                tabu.tenure_summary(active),
                 if restarts > 0 { format!(" (restart {})", restarts) } else { String::new() }
             );
             on_update(&SearchUpdate {
@@ -841,13 +840,13 @@ pub fn run(
         if report_flag.swap(false, Ordering::Relaxed) {
             let _ = writeln!(
                 out,
-                "\n[SIGUSR1] 現在のベスト配列 (スコア={:.4}, iter {})",
+                "\n[中間報告] 現在のベスト配列 (スコア={:.4}, iter {})",
                 best_score, iter
             );
             best.display(out);
         }
         if stop_flag.load(Ordering::Relaxed) {
-            let _ = writeln!(out, "\n[SIGINT] 割り込みシグナルを受信。探索を中断します。");
+            let _ = writeln!(out, "\n[中断] 停止要求を受信。探索を中断します。");
             break;
         }
     }
@@ -1203,16 +1202,7 @@ pub fn build_initial_layout(
         InitialLayoutMode::UserDefined => build_initial_user_defined(ctx, kp, rng, out),
     };
 
-    let _ = writeln!(out, "初期解生成完了（{}）。L1に配置: {:?}",
-        mode.label(),
-        {
-            use crate::chars::CHAR_LIST;
-            (0..kp.num_chars as CharId)
-                .filter(|&c| layout.is_l1(c) && !is_void(c))
-                .map(|c| CHAR_LIST[c as usize])
-                .collect::<String>()
-        },
-    );
+    let _ = writeln!(out, "初期解生成完了（{}）", mode.label());
 
     layout
 }

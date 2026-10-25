@@ -32,6 +32,7 @@ fn write_config_summary(
     weights: &cost::Weights,
     toml_config: &config::Config,
     exclusive_pairs: &[layout::ExclusivePair],
+    l1_only: &std::collections::HashSet<chars::CharId>,
 ) {
     let _ = writeln!(out, "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let _ = writeln!(out, " tsuki_optimize v{} 実行設定", env!("CARGO_PKG_VERSION"));
@@ -64,6 +65,7 @@ fn write_config_summary(
         search::summarize_by_kind(&search_config.tabu_ratio, search::active_op_kinds(kp))
     );
     let _ = writeln!(out, " inter_sample  = {}", search_config.inter_sample);
+    let _ = writeln!(out, " ab_sample_limit = {}", search_config.ab_sample_limit);
     let _ = writeln!(
         out,
         " perturbation  = {} swaps/restart",
@@ -102,6 +104,14 @@ fn write_config_summary(
     if let Some(p) = &toml_config.constraints.preset {
         let _ = writeln!(out, " constraints.preset = {}", p);
     }
+    let mut l1_only: Vec<_> = l1_only.iter().copied().collect();
+    l1_only.sort_unstable();
+    let l1_only: String = l1_only.iter().map(|&c| chars::CHAR_LIST[c as usize]).collect();
+    let _ = writeln!(
+        out,
+        " l1_only       = {}",
+        if l1_only.is_empty() { "(なし)" } else { &l1_only }
+    );
     if exclusive_pairs.is_empty() {
         let _ = writeln!(out, " exclusive_pairs = (なし)");
     } else {
@@ -239,6 +249,9 @@ impl Run {
         );
         self.toml_config.validate(out);
         self.search_config.validate(out);
+        let mut l1_only = self.toml_config.build_l1_only_set();
+        // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）
+        self.yoon.extend_l1_only(&mut l1_only);
         write_config_summary(
             out,
             &kp,
@@ -248,12 +261,10 @@ impl Run {
             &self.weights,
             &self.toml_config,
             &self.exclusive_pairs,
+            &l1_only,
         );
 
         let mut rng = rand::rngs::SmallRng::seed_from_u64(self.seed);
-        let mut l1_only = self.toml_config.build_l1_only_set();
-        // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）
-        self.yoon.extend_l1_only(&mut l1_only);
         let ctx = search::SearchContext {
             corpus: &self.corpus,
             weights: &self.weights,
