@@ -33,7 +33,7 @@ CI (`.github/workflows/ci.yml`) は Linux/Windows/macOS で build → test → c
   - 停止/中間報告は `Arc<AtomicBool>`（CLI では SIGINT/SIGUSR1、GUI では停止ボタン）、進捗は `on_update` コールバックで `SearchUpdate` を渡す。
 - **`yoon.rs`** — ハイブリッド拗音方式（子音1打＋後置シフト `ゃゅょ`）。子音レジストリと `YoonSetup`。
 - **`user_layout.rs`** — `initial_layout.toml` の読み込み・検証。失敗時はランダム配置にフォールバック。
-- **`config.rs`** — TOML 設定。全構造体が `serde(deny_unknown_fields)` なので、フィールド追加時は `config.toml` とデフォルト値も合わせて更新する。廃止フィールド（`tabu_l1` 等）は `Option` で受けて警告のみ出す。
+- **`config.rs`** — TOML 設定。全構造体が `serde(deny_unknown_fields)` なので、フィールド追加時は `config.toml` とデフォルト値も合わせて更新する。廃止したフィールドは受け付けない（書かれていればパースエラー）。
 - **`src/bin/gui/`** — 探索は `std::thread::spawn` した別スレッドで実行し、`mpsc` で `SearchUpdate` とログ文字列を UI に送る（`app.rs`）。`update.rs` が `eframe::App`、`draw.rs` が描画・色分け。日本語フォントは `assets/ipag.ttf` を埋め込み。
 
 ## 注意点

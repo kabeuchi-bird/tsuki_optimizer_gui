@@ -4,9 +4,11 @@ use egui_plot::{Line, PlotPoints, VLine};
 
 use tsuki_optimize::chars::{is_base_kana, CharId, CHAR_LIST, MAX_CHARS, VOID_CHAR_FIRST};
 use tsuki_optimize::corpus::Corpus;
-use tsuki_optimize::cost::{compute_shift_omit, score_breakdown_data, unigram_cost_for_slot, Weights};
+use tsuki_optimize::cost::{
+    compute_shift_omit, score_breakdown_data, unigram_cost_for_slot, Weights, FINGER_NAMES,
+};
 use tsuki_optimize::layout::{
-    col_to_finger, keystrokes_for_slot, layer_of, physical_of, slot_col, slot_hand, slot_row,
+    keystrokes_for_slot, layer_of, physical_of, slot_col, slot_hand, slot_row,
     yoon_physical_forbidden, Hand, KeyboardParams, KeyboardSize, Layer, MAX_SLOTS,
     SHIFT_SLOT_SENTINEL,
 };
@@ -45,7 +47,7 @@ impl App {
         if self.show_layer2 {
             layers.push(("Layer 2", npl));
         }
-        if kp.yoon && self.show_yoon {
+        if kp.yoon() && self.show_yoon {
             layers.push(("拗音面（子音 + ゃゅょ）", 2 * npl));
         }
 
@@ -114,7 +116,7 @@ impl App {
                                 } else {
                                     1
                                 };
-                                shift_slot_color(shift_freq[idx], *max_freq)
+                                heat_color(shift_freq[idx], *max_freq)
                             } else {
                                 egui::Color32::from_rgb(160, 160, 160)
                             }
@@ -226,43 +228,14 @@ impl App {
     }
 
     pub fn draw_finger_load(&self, ui: &mut egui::Ui) {
-        let Some(ref upd) = self.latest_update else {
+        let (Some(upd), Some(corpus), Some(weights)) =
+            (&self.latest_update, &self.corpus, &self.weights)
+        else {
             ui.label("探索を開始してください");
             return;
         };
-        let layout = &upd.best_layout;
-        let kp = layout.kp;
-
-        let mut finger_load = [0.0f64; 8];
-        // 基底かな + 子音（拗音面の打鍵も該当指に加算する）
-        for c in kp.scored_chars() {
-            if !is_base_kana(c) && !kp.is_consonant(c) {
-                continue;
-            }
-            let freq = upd.unigrams[c as usize];
-            if freq == 0.0 {
-                continue;
-            }
-            let slot = layout.char_to_slot[c as usize];
-            let ks = keystrokes_for_slot(slot, kp);
-            for &s in ks.as_slice() {
-                let finger = col_to_finger(slot_col(s, kp.num_cols)) as usize;
-                finger_load[finger] += freq;
-            }
-        }
-
-        // プリセット有効時: シフト→かな→゛/゜ のシフト打鍵省略分を差し引く
-        if let (Some(ref corpus), Some(ref weights)) = (&self.corpus, &self.weights) {
-            let omit = compute_shift_omit(layout, corpus, weights);
-            let left_finger = col_to_finger(slot_col(kp.shift_left, kp.num_cols)) as usize;
-            let right_finger = col_to_finger(slot_col(kp.shift_right, kp.num_cols)) as usize;
-            finger_load[left_finger] = (finger_load[left_finger] - omit[0]).max(0.0);
-            finger_load[right_finger] = (finger_load[right_finger] - omit[1]).max(0.0);
-        }
-
-        let finger_names = [
-            "左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小",
-        ];
+        // 基底かな + 子音の打鍵を指ごとに集計し、プリセットのシフト省略分を差し引いた値
+        let finger_load = score_breakdown_data(&upd.best_layout, corpus, weights).finger_load;
         let max_load = finger_load
             .iter()
             .cloned()
@@ -276,7 +249,7 @@ impl App {
 
         for (i, &load) in finger_load.iter().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(finger_names[i]).monospace());
+                ui.label(egui::RichText::new(FINGER_NAMES[i]).monospace());
                 let ratio = load / max_load;
                 let bar_width = (ratio * bar_max_width as f64) as f32;
 
@@ -447,7 +420,7 @@ impl App {
                     ui.label("トライグラムコスト:");
                     ui.label(format!("{:.4}", bd.tri_cost));
 
-                    if upd.best_layout.kp.yoon {
+                    if upd.best_layout.kp.yoon() {
                         ui.end_row();
                         ui.label("拗音（内数）:");
                         ui.label(format!(
@@ -467,10 +440,6 @@ impl App {
         }
     }
 
-    /// 色分けモードが変わったときにキャッシュを無効化する
-    pub fn invalidate_color_cache(&mut self) {
-        self.cached_color_data = None;
-    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -593,8 +562,8 @@ fn slot_difficulty_for_fitness(s: u8, kp: KeyboardParams, weights: Option<&Weigh
     row_d + col_d + layer_penalty
 }
 
-/// シフトキー頻度から色を計算（ヒートマップモード用）
-fn shift_slot_color(freq: f64, max_freq: f64) -> egui::Color32 {
+/// 頻度ヒートマップの色（max_freq に対する比を対数スケールで青→赤に写す）
+fn heat_color(freq: f64, max_freq: f64) -> egui::Color32 {
     let ratio = (freq / max_freq).min(1.0);
     let t = ((1.0 + ratio * 99.0).ln() / 100.0f64.ln()) as f32;
     if t < 0.5 {
@@ -637,24 +606,7 @@ fn char_color(
             }
         }
         ColorData::Frequency { max_freq, .. } => {
-            let freq = unigrams[char_id as usize] + extra_freq;
-            let ratio = (freq / max_freq).min(1.0);
-            let t = ((1.0 + ratio * 99.0).ln() / 100.0f64.ln()) as f32;
-            if t < 0.5 {
-                let s = t * 2.0;
-                egui::Color32::from_rgb(
-                    (100.0 + s * 100.0) as u8,
-                    (140.0 - s * 60.0) as u8,
-                    (220.0 - s * 40.0) as u8,
-                )
-            } else {
-                let s = (t - 0.5) * 2.0;
-                egui::Color32::from_rgb(
-                    (200.0 + s * 55.0) as u8,
-                    (80.0 + s * 40.0) as u8,
-                    (180.0 - s * 160.0) as u8,
-                )
-            }
+            heat_color(unigrams[char_id as usize] + extra_freq, *max_freq)
         }
         ColorData::None => egui::Color32::from_rgb(220, 220, 220),
     }

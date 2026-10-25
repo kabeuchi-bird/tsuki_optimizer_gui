@@ -1,7 +1,6 @@
 // user_layout.rs — ユーザー定義初期配列（initial_layout.toml）の読み込みと変換
 
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::chars::{build_char_to_id, CharId, CONSONANT_FIRST, MAX_CHARS, VOID_CHAR_FIRST};
@@ -87,7 +86,29 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
                     continue;
                 }
 
-                assign_char(c, slot, &char_map, &mut cts, &mut stc, &mut void_next, row, col, layer)?;
+                let at = format!("{layer} row{row}, col{col}");
+                let char_id = if c == '□' {
+                    // void 文字: L1/L2 の void 区間 [VOID_CHAR_FIRST, CONSONANT_FIRST) から割り当てる。
+                    // CONSONANT_FIRST 以降は拗音面の領域なので侵食してはならない。
+                    if void_next >= CONSONANT_FIRST {
+                        return Err(format!(
+                            "void 文字（□）の数が上限（{}個）を超えました（{at}）",
+                            CONSONANT_FIRST - VOID_CHAR_FIRST
+                        ));
+                    }
+                    void_next += 1;
+                    void_next - 1
+                } else {
+                    let id = *char_map
+                        .get(&c)
+                        .ok_or_else(|| format!("未知の文字 '{c}' ({at})"))?;
+                    if cts[id as usize] != u8::MAX {
+                        return Err(format!("文字 '{c}' が重複しています（{at}）"));
+                    }
+                    id
+                };
+                cts[char_id as usize] = slot;
+                stc[slot as usize] = char_id;
             }
         }
     }
@@ -116,7 +137,7 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
         slot_used[s as usize] = true;
     }
 
-    if kp.size == crate::layout::KeyboardSize::K3x10SingleShift
+    if kp.size == KeyboardSize::K3x10SingleShift
         && cts[crate::chars::TOUTEN_ID as usize] != crate::layout::E_SHIFT_SLOT
     {
         return Err(format!(
@@ -130,55 +151,4 @@ pub fn parse_user_layout(kp: KeyboardParams, def: &UserLayoutDef) -> Result<Layo
         char_to_slot: cts,
         slot_to_char: stc,
     })
-}
-
-/// 1文字をスロットへ割り当てる（cts / stc を更新）
-#[allow(clippy::too_many_arguments)]
-fn assign_char(
-    c: char,
-    slot: SlotId,
-    char_map: &HashMap<char, CharId>,
-    cts: &mut [u8; MAX_CHARS],
-    stc: &mut [CharId; MAX_SLOTS],
-    void_next: &mut CharId,
-    row: usize,
-    col: usize,
-    layer: &str,
-) -> Result<(), String> {
-    if c == '□' {
-        // void 文字: L1/L2 の void 区間 [VOID_CHAR_FIRST, CONSONANT_FIRST) から割り当てる。
-        // CONSONANT_FIRST 以降は拗音面の領域なので侵食してはならない。
-        if *void_next >= CONSONANT_FIRST {
-            return Err(format!(
-                "void 文字（□）の数が上限（{}個）を超えました（{} row{}, col{}）",
-                CONSONANT_FIRST - VOID_CHAR_FIRST,
-                layer,
-                row,
-                col
-            ));
-        }
-        cts[*void_next as usize] = slot;
-        stc[slot as usize] = *void_next;
-        *void_next += 1;
-        return Ok(());
-    }
-
-    let char_id = char_map.get(&c).copied().ok_or_else(|| {
-        format!(
-            "未知の文字 '{}' ({} row{}, col{})",
-            c, layer, row, col
-        )
-    })?;
-
-    // 重複チェック
-    if cts[char_id as usize] != u8::MAX {
-        return Err(format!(
-            "文字 '{}' が重複しています（{} row{}, col{}）",
-            c, layer, row, col
-        ));
-    }
-
-    cts[char_id as usize] = slot;
-    stc[slot as usize] = char_id;
-    Ok(())
 }

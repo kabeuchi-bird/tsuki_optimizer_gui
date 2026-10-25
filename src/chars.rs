@@ -160,34 +160,37 @@ pub fn decompose(c: char, map: &HashMap<char, CharId>) -> ArrayVec2 {
     ArrayVec2::empty()
 }
 
-/// ヒープアロケーションなしの小容量Vec（最大2要素）
-#[derive(Clone, Copy, Default)]
+/// ヒープアロケーションなしの小容量Vec（最大2要素）。文字分解とキーストロークで共用。
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ArrayVec2 {
-    data: [CharId; 2],
+    data: [u8; 2],
     len: u8,
 }
 
 impl ArrayVec2 {
+    #[inline]
     pub fn empty() -> Self {
-        Self {
-            data: [0; 2],
-            len: 0,
-        }
+        Self::default()
     }
-    pub fn one(a: CharId) -> Self {
-        Self {
-            data: [a, 0],
-            len: 1,
-        }
+    #[inline]
+    pub fn one(a: u8) -> Self {
+        Self { data: [a, 0], len: 1 }
     }
-    pub fn two(a: CharId, b: CharId) -> Self {
-        Self {
-            data: [a, b],
-            len: 2,
-        }
+    #[inline]
+    pub fn two(a: u8, b: u8) -> Self {
+        Self { data: [a, b], len: 2 }
     }
-    pub fn as_slice(&self) -> &[CharId] {
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
         &self.data[..self.len as usize]
+    }
+    #[inline]
+    pub fn first(&self) -> u8 {
+        self.data[0]
+    }
+    #[inline]
+    pub fn last(&self) -> u8 {
+        self.data[self.len as usize - 1]
     }
 }
 

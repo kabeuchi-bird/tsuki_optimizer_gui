@@ -43,8 +43,6 @@ pub struct Corpus {
 pub struct CorpusStats {
     pub total_chars: u64,
     pub skipped_chars: u64,
-    /// 子音に先行されない小書きゃゅょ（てゃ/ふゅ等）でスキップした数（hybrid のみ）
-    pub yoon_skipped: u64,
     pub num_segments: usize,
     pub num_unigrams: usize,
     pub num_bigrams: usize,
@@ -67,10 +65,6 @@ pub struct TrigramEntry {
 }
 
 impl Corpus {
-    pub fn from_file(path: &Path) -> std::io::Result<Self> {
-        Self::from_file_with_yoon(path, None)
-    }
-
     /// 拗音テーブルを指定してファイルからコーパスを構築する（None で既存動作）。
     pub fn from_file_with_yoon(path: &Path, yoon: Option<&YoonTable>) -> std::io::Result<Self> {
         let text = fs::read_to_string(path)?;
@@ -92,14 +86,13 @@ impl Corpus {
     ///
     /// # 拗音分解（`yoon = Some(table)` のとき）
     /// - `基底かな + ゃ/ゅ/ょ` を最優先でユニット化 → `[子音CharId, 小書きCharId]` の2トークン
-    /// - 子音に先行されない小書き ゃゅょ（てゃ/ふゅ等）→ セグメントを切り、yoon_skipped を加算
+    /// - 子音に先行されない小書き ゃゅょ（てゃ/ふゅ等）→ セグメントを切り、skipped_chars に数える
     pub fn from_str_with_yoon(text: &str, yoon: Option<&YoonTable>) -> Self {
         let map = build_char_to_id();
 
         let mut segments: Vec<Vec<CharId>> = Vec::new();
         let mut current: Vec<CharId> = Vec::new();
         let mut skipped_chars = 0u64;
-        let mut yoon_skipped = 0u64;
 
         // 1文字先読みするだけなので peekable で足りる（コーパス全体を Vec<char> に
         // 展開すると原文と同等のメモリを追加で消費してしまう）
@@ -122,11 +115,11 @@ impl Corpus {
                     }
                 }
                 // 子音に先行されない小書き ゃゅょ → セグメント区切り＋スキップ
-                if YoonTable::is_shift_char(c) {
+                if yoon_shift_id(c).is_some() {
                     if !current.is_empty() {
                         segments.push(std::mem::take(&mut current));
                     }
-                    yoon_skipped += 1;
+                    skipped_chars += 1;
                     continue;
                 }
             }
@@ -212,7 +205,6 @@ impl Corpus {
         let stats = CorpusStats {
             total_chars,
             skipped_chars,
-            yoon_skipped,
             num_segments: segments.len(),
             num_unigrams: uni_count.iter().filter(|&&c| c > 0).count(),
             num_bigrams: bigrams.len(),
@@ -386,7 +378,7 @@ mod tests {
         let yt = default_table();
         let map = crate::chars::build_char_to_id();
         let corpus = Corpus::from_str_with_yoon("てゃ", Some(&yt));
-        assert_eq!(corpus.stats.yoon_skipped, 1);
+        assert_eq!(corpus.stats.skipped_chars, 1);
         assert!(corpus.unigrams[map[&'て'] as usize] > 0.0);
         // ゃ 単独はユニグラムに現れない（スキップ）
         assert_eq!(corpus.unigrams[map[&'ゃ'] as usize], 0.0);
@@ -421,6 +413,6 @@ mod tests {
         assert_eq!(corpus.stats.total_chars, 2);
         assert!(corpus.unigrams[map[&'き'] as usize] > 0.0);
         assert!(corpus.unigrams[map[&'ゃ'] as usize] > 0.0);
-        assert_eq!(corpus.stats.yoon_skipped, 0);
+        assert_eq!(corpus.stats.skipped_chars, 0);
     }
 }

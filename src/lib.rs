@@ -41,16 +41,16 @@ fn write_config_summary(
     let _ = writeln!(
         out,
         " yoon_mode     = {}",
-        if kp.yoon { "hybrid" } else { "none" }
+        if kp.yoon() { "hybrid" } else { "none" }
     );
-    if kp.yoon {
-        let tokens: Vec<&str> = (0..kp.num_consonants)
+    if kp.yoon() {
+        let tokens: Vec<&str> = (0..kp.num_consonants())
             .filter_map(|i| yoon::consonant_label(kp.consonant_mask, chars::CONSONANT_FIRST + i))
             .collect();
         let _ = writeln!(
             out,
             " consonants    = {} 種 [{}]",
-            kp.num_consonants,
+            kp.num_consonants(),
             tokens.join(" ")
         );
     }
@@ -247,7 +247,6 @@ impl Run {
             st.num_bigrams,
             st.num_trigrams,
         );
-        self.toml_config.validate(out);
         self.search_config.validate(out);
         let mut l1_only = self.toml_config.build_l1_only_set();
         // hybrid では拗音シフト ゃゅょ を L1 固定にする（1打でなければ方式が成立しない）

@@ -145,25 +145,13 @@ impl YoonTable {
         self.registry_mask
     }
 
-    /// 有効子音数。
-    pub fn num_consonants(&self) -> usize {
-        self.registry_mask.count_ones() as usize
-    }
-
     /// (基底かな, 小書きかな) が拗音ユニットなら子音 CharId を返す。
     ///
     /// 子音はゃゅょのどれと組んでも同じなので、判定は `small` が拗音シフトかどうかと
     /// `base` が有効子音の基底かどうかの2点。
     pub fn lookup_unit(&self, base: char, small: char) -> Option<CharId> {
-        if !Self::is_shift_char(small) {
-            return None;
-        }
+        yoon_shift_id(small)?;
         self.unit_map.get(&base).copied()
-    }
-
-    /// c が拗音シフトかな（ゃゅょ）か。
-    pub fn is_shift_char(c: char) -> bool {
-        YOON_SHIFT_CHARS.contains(&c)
     }
 }
 
@@ -205,11 +193,8 @@ impl YoonSetup {
         }
         let table = YoonTable::from_spec(consonants.unwrap_or(DEFAULT_CONSONANTS))
             .map_err(|e| format!("子音セットが不正です: {e}"))?;
-        let kp = kp
-            .with_yoon(table.registry_mask())
-            .map_err(|e| format!("拗音面を構成できません: {e}"))?;
         Ok(YoonSetup {
-            kp,
+            kp: kp.with_yoon(table.registry_mask()),
             table: Some(table),
         })
     }
@@ -258,7 +243,7 @@ mod tests {
     #[test]
     fn test_default_consonants_dense_ids() {
         let yt = YoonTable::from_spec(DEFAULT_CONSONANTS).unwrap();
-        assert_eq!(yt.num_consonants(), 11); // 必須11種（Dy除く）
+        assert_eq!(yt.registry_mask().count_ones(), 11); // 必須11種（Dy除く）
         // CONSONANT_FIRST から連番、レジストリ順
         assert_eq!(
             consonant_label(yt.registry_mask(), CONSONANT_FIRST),
@@ -275,7 +260,7 @@ mod tests {
     fn test_optional_dy_registry_order() {
         // spec の並びに依らずレジストリ順に dense 採番される（Ky→Dy の順）
         let yt = YoonTable::from_spec("DyKy").unwrap();
-        assert_eq!(yt.num_consonants(), 2);
+        assert_eq!(yt.registry_mask().count_ones(), 2);
         assert_eq!(yt.lookup_unit('き', 'ゃ'), Some(CONSONANT_FIRST)); // Ky が先
         assert_eq!(yt.lookup_unit('ぢ', 'ょ'), Some(CONSONANT_FIRST + 1)); // Dy が後
     }
@@ -284,7 +269,7 @@ mod tests {
     fn test_longest_match_j_and_ch() {
         // "JCh" → J(1文字) + Ch(2文字)
         let yt = YoonTable::from_spec("JCh").unwrap();
-        assert_eq!(yt.num_consonants(), 2);
+        assert_eq!(yt.registry_mask().count_ones(), 2);
         assert!(yt.lookup_unit('じ', 'ゅ').is_some());
         assert!(yt.lookup_unit('ち', 'ゃ').is_some());
     }

@@ -42,13 +42,6 @@ pub struct RunConfig {
     /// タブーテニュア（近傍サイズ比）。`[run.tabu_ratio]` サブテーブル。
     #[serde(default)]
     pub tabu_ratio: TabuRatioConfig,
-
-    /// 廃止済み（絶対手数指定）。`deny_unknown_fields` で古い設定が即エラーに
-    /// ならないよう受け取るだけで、値は使わず警告する。
-    pub tabu_l1: Option<usize>,
-    pub tabu_l2: Option<usize>,
-    pub tabu_inter: Option<usize>,
-    pub tabu_yoon: Option<usize>,
     pub inter_sample: Option<usize>,
     pub ab_sample_limit: Option<usize>,
     pub log_interval: Option<usize>,
@@ -56,9 +49,6 @@ pub struct RunConfig {
     /// 多様化の開始閾値。旧名 `tenure_grow_threshold` も受け付ける。
     #[serde(alias = "tenure_grow_threshold")]
     pub diversify_threshold: Option<f64>,
-    /// 廃止済み（テニュア拡大）。受け取るだけで、値は使わず警告する。
-    pub tenure_grow_interval: Option<usize>,
-    pub tenure_max_scale: Option<f64>,
     /// 多様化（頻度ベース長期記憶）の強さ。0.0 で無効。
     pub diversification: Option<f64>,
 
@@ -143,27 +133,6 @@ impl Config {
     /// yoon.mode 設定から YoonMode を生成する（未指定は None）
     pub fn build_yoon_mode(&self) -> YoonMode {
         self.yoon.mode.as_deref().map_or(YoonMode::None, YoonMode::from_config_str)
-    }
-
-    /// 設定ファイル固有の検証（`SearchConfig::validate` と同じ出力先へ書く）。
-    ///
-    /// `build_search_config` は副作用を持たせず、警告はこちらに集める。
-    pub fn validate(&self, out: &mut impl std::io::Write) {
-        let r = &self.run;
-        const TABU: &str = "（絶対手数指定）→ 無視します。近傍サイズ比で指定する [run.tabu_ratio] を使ってください";
-        const TENURE: &str = "（テニュア拡大は多様化で代替）→ 無視します";
-        for (key, given, hint) in [
-            ("tabu_l1", r.tabu_l1.is_some(), TABU),
-            ("tabu_l2", r.tabu_l2.is_some(), TABU),
-            ("tabu_inter", r.tabu_inter.is_some(), TABU),
-            ("tabu_yoon", r.tabu_yoon.is_some(), TABU),
-            ("tenure_grow_interval", r.tenure_grow_interval.is_some(), TENURE),
-            ("tenure_max_scale", r.tenure_max_scale.is_some(), TENURE),
-        ] {
-            if given {
-                let _ = writeln!(out, "警告: {key} は廃止されました{hint}");
-            }
-        }
     }
 
     /// デフォルト値と設定ファイルの内容をマージして SearchConfig を生成する

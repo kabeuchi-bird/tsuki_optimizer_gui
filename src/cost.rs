@@ -177,21 +177,10 @@ pub fn bigram_inter_cost(c1: CharId, c2: CharId, slot1: SlotId, slot2: SlotId, w
     // （シフトキー→対象文字→゛ 打鍵列においてシフトキーを不要と見なす）
     // ks1 = [shift_slot, physical_slot]（L2の場合）なので ks1.first() = シフトキースロット
     // delta_score() は slot_after_swap() で仮スロットを渡すため追加実装不要
-    if c2 == DAKUTEN_ID
-        && w.daku_l2_trigger[c1 as usize]
-        && layer_of(slot1, w.kp) == Layer::L2
-    {
-        let nc = w.kp.num_cols;
-        let shift_slot = ks1.first();
-        let shift_diff =
-            w.slot_difficulty[slot_row(shift_slot, nc) as usize][slot_col(shift_slot, nc) as usize];
-        cost -= w.stroke_scale + shift_diff;
-    }
-    // L2配置の半濁音基音（は行）→ ゜ のとき、同様にシフトキー1打鍵分を削減
-    if c2 == HANDAKUTEN_ID
-        && w.handaku_l2_trigger[c1 as usize]
-        && layer_of(slot1, w.kp) == Layer::L2
-    {
+    // L2配置の半濁音基音（は行）→ ゜ のときも同様
+    let triggered = (c2 == DAKUTEN_ID && w.daku_l2_trigger[c1 as usize])
+        || (c2 == HANDAKUTEN_ID && w.handaku_l2_trigger[c1 as usize]);
+    if triggered && layer_of(slot1, w.kp) == Layer::L2 {
         let nc = w.kp.num_cols;
         let shift_slot = ks1.first();
         let shift_diff =
@@ -245,6 +234,21 @@ pub fn trigram_cost(
     cost
 }
 
+/// スロット3つからトライグラムコストを求める（各文字の最終打鍵キーと手で評価）
+#[inline]
+fn trigram_cost_at(s1: SlotId, s2: SlotId, s3: SlotId, w: &Weights) -> f64 {
+    let (kp, nc) = (w.kp, w.kp.num_cols);
+    trigram_cost(
+        keystrokes_for_slot(s1, kp).last(),
+        keystrokes_for_slot(s2, kp).last(),
+        keystrokes_for_slot(s3, kp).last(),
+        slot_hand(s1, nc),
+        slot_hand(s2, nc),
+        slot_hand(s3, nc),
+        w,
+    )
+}
+
 /// ——————————————————————————————
 /// 総合スコア（全コーパスに対して計算、値が小さいほど良い）
 /// ——————————————————————————————
@@ -290,15 +294,7 @@ pub fn score(layout: &Layout, corpus: &Corpus, w: &Weights) -> f64 {
         let s1 = layout.char_to_slot[tg.c1 as usize];
         let s2 = layout.char_to_slot[tg.c2 as usize];
         let s3 = layout.char_to_slot[tg.c3 as usize];
-        total += tg.freq * trigram_cost(
-            keystrokes_for_slot(s1, w.kp).last(),
-            keystrokes_for_slot(s2, w.kp).last(),
-            keystrokes_for_slot(s3, w.kp).last(),
-            slot_hand(s1, w.kp.num_cols),
-            slot_hand(s2, w.kp.num_cols),
-            slot_hand(s3, w.kp.num_cols),
-            w,
-        );
+        total += tg.freq * trigram_cost_at(s1, s2, s3, w);
     }
 
     total
@@ -424,28 +420,12 @@ pub fn delta_score(
                 let s_c1_old = layout.char_to_slot[tg.c1 as usize];
                 let s_c2_old = layout.char_to_slot[tg.c2 as usize];
                 let s_c3_old = layout.char_to_slot[tg.c3 as usize];
-                let old_cost = trigram_cost(
-                    keystrokes_for_slot(s_c1_old, w.kp).last(),
-                    keystrokes_for_slot(s_c2_old, w.kp).last(),
-                    keystrokes_for_slot(s_c3_old, w.kp).last(),
-                    slot_hand(s_c1_old, w.kp.num_cols),
-                    slot_hand(s_c2_old, w.kp.num_cols),
-                    slot_hand(s_c3_old, w.kp.num_cols),
-                    w,
-                );
+                let old_cost = trigram_cost_at(s_c1_old, s_c2_old, s_c3_old, w);
 
                 let s_c1_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c1);
                 let s_c2_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c2);
                 let s_c3_new = slot_after_swap(layout, swap_c1, swap_c2, tg.c3);
-                let new_cost = trigram_cost(
-                    keystrokes_for_slot(s_c1_new, w.kp).last(),
-                    keystrokes_for_slot(s_c2_new, w.kp).last(),
-                    keystrokes_for_slot(s_c3_new, w.kp).last(),
-                    slot_hand(s_c1_new, w.kp.num_cols),
-                    slot_hand(s_c2_new, w.kp.num_cols),
-                    slot_hand(s_c3_new, w.kp.num_cols),
-                    w,
-                );
+                let new_cost = trigram_cost_at(s_c1_new, s_c2_new, s_c3_new, w);
 
                 delta += tg.freq * (new_cost - old_cost);
             }
@@ -548,15 +528,7 @@ pub fn score_breakdown_data(layout: &Layout, corpus: &Corpus, w: &Weights) -> Sc
         let s1 = layout.char_to_slot[tg.c1 as usize];
         let s2 = layout.char_to_slot[tg.c2 as usize];
         let s3 = layout.char_to_slot[tg.c3 as usize];
-        tri_cost += tg.freq * trigram_cost(
-            keystrokes_for_slot(s1, w.kp).last(),
-            keystrokes_for_slot(s2, w.kp).last(),
-            keystrokes_for_slot(s3, w.kp).last(),
-            slot_hand(s1, w.kp.num_cols),
-            slot_hand(s2, w.kp.num_cols),
-            slot_hand(s3, w.kp.num_cols),
-            w,
-        );
+        tri_cost += tg.freq * trigram_cost_at(s1, s2, s3, w);
     }
 
     ScoreBreakdown {
@@ -588,7 +560,7 @@ pub fn score_breakdown(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut 
     let _ = writeln!(out, "  難易度コスト  : {:.4}", bd.uni_cost);
     let _ = writeln!(out, "  バイグラムコスト: {:.4}", bd.bi_cost);
     let _ = writeln!(out, "  トライグラムコスト: {:.4}", bd.tri_cost);
-    if w.kp.yoon {
+    if w.kp.yoon() {
         let _ = writeln!(
             out,
             "  └ 拗音（内数）: 出現 {:.2}%  打鍵 {:.4}  難易度 {:.4}  バイグラム {:.4}",
@@ -612,10 +584,12 @@ pub fn lookup_bigram_freq(corpus: &Corpus, c1: CharId, c2: CharId) -> f64 {
     0.0
 }
 
+/// 指番号（`col_to_finger`）→ 表示名
+pub const FINGER_NAMES: [&str; 8] = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
+
 /// 頻出バイグラム Top 10 の指負荷を表示
 pub fn write_top_bigrams(layout: &Layout, corpus: &Corpus, w: &Weights, out: &mut impl Write) {
     const TOP_N: usize = 10;
-    const FINGER_NAMES: [&str; 8] = ["左小", "左薬", "左中", "左人", "右人", "右中", "右薬", "右小"];
 
     fn format_keystrokes(slot: SlotId, kp: KeyboardParams) -> String {
         let ks = keystrokes_for_slot(slot, kp);

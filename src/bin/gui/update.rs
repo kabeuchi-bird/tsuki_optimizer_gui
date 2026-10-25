@@ -34,63 +34,26 @@ impl eframe::App for App {
 
             // 2段目: 配列に関する設定（1行に収めると拗音の欄が画面外に出るため分ける）
             ui.horizontal(|ui| {
-                ui.label("keyboard:");
-                egui::ComboBox::from_id_salt("kb_size")
-                    .selected_text(&self.keyboard_size_str_input)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.keyboard_size_str_input,
-                            "3x10".to_string(),
-                            "3x10",
-                        );
-                        ui.selectable_value(
-                            &mut self.keyboard_size_str_input,
-                            "3x10_single_shift".to_string(),
-                            "3x10 単一シフト",
-                        );
-                        ui.selectable_value(
-                            &mut self.keyboard_size_str_input,
-                            "3x11".to_string(),
-                            "3x11",
-                        );
-                    });
+                combo(
+                    ui,
+                    "keyboard:",
+                    &mut self.keyboard_size_str_input,
+                    &[("3x10", "3x10"), ("3x10_single_shift", "3x10 単一シフト"), ("3x11", "3x11")],
+                );
                 ui.separator();
-                ui.label("初期配列:");
-                egui::ComboBox::from_id_salt("initial_layout")
-                    .selected_text(&self.initial_layout_str_input)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.initial_layout_str_input,
-                            "2-263".to_string(),
-                            "2-263",
-                        );
-                        ui.selectable_value(
-                            &mut self.initial_layout_str_input,
-                            "random".to_string(),
-                            "ランダム",
-                        );
-                        ui.selectable_value(
-                            &mut self.initial_layout_str_input,
-                            "user-defined".to_string(),
-                            "ユーザー定義",
-                        );
-                    });
+                combo(
+                    ui,
+                    "初期配列:",
+                    &mut self.initial_layout_str_input,
+                    &[("2-263", "2-263"), ("random", "ランダム"), ("user-defined", "ユーザー定義")],
+                );
                 ui.separator();
-                ui.label("拗音:");
-                egui::ComboBox::from_id_salt("yoon_mode")
-                    .selected_text(&self.yoon_mode_str_input)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.yoon_mode_str_input,
-                            "none".to_string(),
-                            "none（従来）",
-                        );
-                        ui.selectable_value(
-                            &mut self.yoon_mode_str_input,
-                            "hybrid".to_string(),
-                            "hybrid（拗音面）",
-                        );
-                    });
+                combo(
+                    ui,
+                    "拗音:",
+                    &mut self.yoon_mode_str_input,
+                    &[("none", "none（従来）"), ("hybrid", "hybrid（拗音面）")],
+                );
                 // 子音セットは hybrid のときだけ意味を持つ
                 if self.yoon_mode_str_input == "hybrid" {
                     ui.label("子音:");
@@ -155,13 +118,13 @@ impl eframe::App for App {
                 let has_yoon = self
                     .latest_update
                     .as_ref()
-                    .is_some_and(|u| u.best_layout.kp.yoon);
+                    .is_some_and(|u| u.best_layout.kp.yoon());
                 if has_yoon {
                     ui.checkbox(&mut self.show_yoon, "拗音面 表示");
                 }
             });
             if self.color_mode != prev_mode {
-                self.invalidate_color_cache();
+                self.cached_color_data = None;
             }
 
             ui.separator();
@@ -206,4 +169,16 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+}
+
+/// ラベル付きの ComboBox（値は設定文字列、options は (値, 表示名)）
+fn combo(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[(&str, &str)]) {
+    ui.label(label);
+    egui::ComboBox::from_id_salt(label)
+        .selected_text(value.as_str())
+        .show_ui(ui, |ui| {
+            for &(v, text) in options {
+                ui.selectable_value(value, v.to_string(), text);
+            }
+        });
 }
